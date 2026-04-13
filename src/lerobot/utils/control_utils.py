@@ -18,6 +18,8 @@
 
 
 import logging
+import sys
+import threading
 import traceback
 from contextlib import nullcontext
 from copy import copy
@@ -140,6 +142,42 @@ def init_keyboard_listener():
         logging.warning(
             "Headless environment detected. On-screen cameras display and keyboard inputs will not be available."
         )
+        # In headless/SSH mode, use a stdin thread so the user can control recording
+        # via typed commands instead of arrow keys:
+        #   Enter → start episode (when waiting), or end current phase early
+        #   r     → discard episode and re-record  (same as ← left arrow)
+        #   q     → stop recording and save         (same as Esc)
+        #
+        # events["_start_event"] is a threading.Event set by lerobot_record.py when
+        # waiting for the user to press Enter before an episode begins.
+        # The thread sets it instead of triggering exit_early so there is no race.
+        def _stdin_listener():
+            while True:
+                try:
+                    line = sys.stdin.readline()
+                    if line is None or events.get("stop_recording"):
+                        break
+                    cmd = line.strip().lower()
+                    start_event = events.get("_start_event")
+                    if start_event is not None:
+                        # waiting for user to confirm ready — any input starts the episode
+                        start_event.set()
+                    elif cmd == "r":
+                        print("Re-record: discarding current episode...")
+                        events["rerecord_episode"] = True
+                        events["exit_early"] = True
+                    elif cmd == "q":
+                        print("Stopping recording and saving...")
+                        events["stop_recording"] = True
+                        events["exit_early"] = True
+                    else:
+                        print("Ending current phase early...")
+                        events["exit_early"] = True
+                except Exception:
+                    break
+
+        t = threading.Thread(target=_stdin_listener, daemon=True)
+        t.start()
         listener = None
         return listener, events
 
@@ -189,7 +227,7 @@ def sanity_check_dataset_name(repo_id, policy_cfg):
     # Check if dataset_name starts with "eval_" but policy is missing
     if dataset_name.startswith("eval_") and policy_cfg is None:
         raise ValueError(
-            f"Your dataset name begins with 'eval_' ({dataset_name}), but no policy is provided ({policy_cfg.type})."
+            f"Your dataset name begins with 'eval_' ({dataset_name}), but no policy is provided (None)."
         )
 
     # Check if dataset_name does not start with "eval_" but policy is provided

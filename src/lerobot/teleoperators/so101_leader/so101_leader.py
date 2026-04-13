@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import sys
 import time
 
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
@@ -87,6 +88,12 @@ class SO101Leader(Teleoperator):
 
     def calibrate(self) -> None:
         if self.calibration:
+            # Use the saved calibration automatically when running noninteractively.
+            if not sys.stdin.isatty():
+                logger.info(f"Writing calibration file associated with the id {self.id} to the motors")
+                self.bus.write_calibration(self.calibration)
+                return
+
             # Calibration file exists, ask user whether to use it or run new calibration
             user_input = input(
                 f"Press ENTER to use provided calibration file associated with the id {self.id}, or type 'c' and press ENTER to run calibration: "

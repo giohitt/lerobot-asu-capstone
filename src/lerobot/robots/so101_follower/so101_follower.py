@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import logging
+import sys
 import time
 from functools import cached_property
 from typing import Any
@@ -109,7 +110,12 @@ class SO101Follower(Robot):
 
     def calibrate(self) -> None:
         if self.calibration:
-            # self.calibration is not empty here
+            # Use the saved calibration automatically when running noninteractively.
+            if not sys.stdin.isatty():
+                logger.info(f"Writing calibration file associated with the id {self.id} to the motors")
+                self.bus.write_calibration(self.calibration)
+                return
+
             user_input = input(
                 f"Press ENTER to use provided calibration file associated with the id {self.id}, or type 'c' and press ENTER to run calibration: "
             )
@@ -223,7 +229,13 @@ class SO101Follower(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        self.bus.disconnect(self.config.disable_torque_on_disconnect)
+        try:
+            self.bus.disconnect(self.config.disable_torque_on_disconnect)
+        except RuntimeError as e:
+            logger.warning(f"Ignoring shutdown error for {self}: {e}")
+            if self.bus.is_connected:
+                self.bus.disconnect(False)
+
         for cam in self.cameras.values():
             cam.disconnect()
 

@@ -381,8 +381,10 @@ def record_loop(
 def record(cfg: RecordConfig) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
-    if cfg.display_data:
+    if cfg.display_data and not is_headless():
         init_rerun(session_name="recording")
+    elif cfg.display_data:
+        logging.warning("display_data=true was requested, but the environment is headless. Skipping on-screen visualization.")
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
@@ -460,6 +462,24 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         with VideoEncodingManager(dataset):
             recorded_episodes = 0
             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                if is_headless():
+                    import threading
+                    start_event = threading.Event()
+                    events["_start_event"] = start_event
+                    print(
+                        f"\n{'='*50}\n"
+                        f"  Episode {dataset.num_episodes + 1} / {cfg.dataset.num_episodes}\n"
+                        f"  Press Enter to start recording\n"
+                        f"  During recording:\n"
+                        f"    Enter → save episode early\n"
+                        f"    r     → discard and re-record\n"
+                        f"    q     → stop and save all\n"
+                        f"{'='*50}",
+                        flush=True,
+                    )
+                    start_event.wait()
+                    events["_start_event"] = None
+                    events["exit_early"] = False
                 log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
                 record_loop(
                     robot=robot,
