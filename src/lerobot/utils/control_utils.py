@@ -159,17 +159,23 @@ def init_keyboard_listener():
                         break
                     cmd = line.strip().lower()
                     start_event = events.get("_start_event")
-                    if start_event is not None:
-                        # waiting for user to confirm ready — any input starts the episode
-                        start_event.set()
-                    elif cmd == "r":
-                        print("Re-record: discarding current episode...")
-                        events["rerecord_episode"] = True
-                        events["exit_early"] = True
-                    elif cmd == "q":
+                    if cmd == "q":
+                        # q always stops recording regardless of current phase
                         print("Stopping recording and saving...")
                         events["stop_recording"] = True
                         events["exit_early"] = True
+                        if start_event is not None:
+                            start_event.set()
+                    elif cmd == "r":
+                        # r always re-records regardless of current phase
+                        print("Re-record: discarding current episode...")
+                        events["rerecord_episode"] = True
+                        events["exit_early"] = True
+                        if start_event is not None:
+                            start_event.set()
+                    elif start_event is not None:
+                        # waiting for user to confirm ready — Enter starts the episode
+                        start_event.set()
                     else:
                         print("Ending current phase early...")
                         events["exit_early"] = True

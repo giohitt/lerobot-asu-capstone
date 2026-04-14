@@ -13,6 +13,9 @@
 PYTHON=/home/jetson23/miniforge3/envs/lerobot/bin/python
 LEROBOT_DIR=/home/jetson23/lerobot
 
+# Clean up any background children when the script exits
+trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null' EXIT
+
 # Suppress noisy Python/HuggingFace warnings — show INFO and above only
 export PYTHONWARNINGS=ignore
 export TRANSFORMERS_VERBOSITY=error
@@ -46,28 +49,22 @@ episode_count()  {
 set_color_config() {
   case "$1" in
     green)
-      DATASET="local/cylinder_sorting_green_v1"
-      MODEL="act_green_v1"
       TASK="Pick green cylinder and place in left bin"
       ;;
     blue)
-      DATASET="local/cylinder_sorting_blue_v1"
-      MODEL="act_blue_v1"
       TASK="Pick blue cylinder and place in right bin"
       ;;
     yellow)
-      DATASET="local/cylinder_sorting_yellow_v1"
-      MODEL="act_yellow_v1"
       TASK="Pick yellow cylinder and place in center bin"
       ;;
     mixed|green-blue)
       COLOR="mixed"
-      DATASET="local/cylinder_sorting_mixed_v1"
-      MODEL="act_mixed_v1"
       TASK="Pick cylinder and place in correct bin"
       ;;
     *) echo "Unknown color: $1. Valid: green, blue, yellow, mixed"; exit 1 ;;
   esac
+  DATASET="local/cylinder_sorting_${COLOR}_${VERSION}"
+  MODEL="act_${COLOR}_${VERSION}"
 }
 
 # ── Camera detection ───────────────────────────────────────
@@ -310,20 +307,49 @@ interactive_train() {
 
 interactive_eval() {
   top; row "TEST MODEL — $COLOR"; divider
-  if ! model_exists; then
+
+  # List all model directories matching the color
+  local train_dir="$LEROBOT_DIR/outputs/train"
+  local models=()
+  while IFS= read -r d; do
+    [[ "$d" == *"$COLOR"* ]] && models+=("$d")
+  done < <(ls "$train_dir" 2>/dev/null | sort)
+
+  if [ ${#models[@]} -eq 0 ]; then
     row "No trained model found for $COLOR."
     row "Please run 'train' first, then come back."
     bot; exit 1
   fi
 
-  # List available checkpoints
-  local ckpt_dir="$LEROBOT_DIR/outputs/train/$MODEL/checkpoints"
+  local chosen_model
+  if [ ${#models[@]} -eq 1 ]; then
+    chosen_model="${models[0]}"
+    row "Model: $chosen_model"; bot; echo ""
+  else
+    row "Available models:"; bot; echo ""
+    local i=1
+    for m in "${models[@]}"; do
+      local last_ckpt=$(ls "$train_dir/$m/checkpoints" 2>/dev/null | grep -v last | sort | tail -1)
+      echo "  $i) $m  (last checkpoint: ${last_ckpt:-unknown})"
+      (( i++ ))
+    done
+    echo ""
+    ask "Which model to use?" "1"
+    local midx=$(( REPLY - 1 ))
+    chosen_model="${models[$midx]}"
+    echo "Selected: $chosen_model"
+  fi
+
+  # List available checkpoints in chosen model
+  local ckpt_dir="$train_dir/$chosen_model/checkpoints"
   local checkpoints=()
   while IFS= read -r d; do
     checkpoints+=("$d")
   done < <(ls "$ckpt_dir" 2>/dev/null | sort)
 
-  row "Available checkpoints:"; bot; echo ""
+  echo ""
+  echo "Checkpoints in $chosen_model:"
+  echo ""
   local i=1
   for c in "${checkpoints[@]}"; do
     if [ "$c" = "last" ]; then
@@ -334,11 +360,11 @@ interactive_eval() {
     (( i++ ))
   done
   echo ""
-  ask "Which checkpoint to use?" "1"
+  ask "Which checkpoint to use?" "${#checkpoints[@]}"
   local idx=$(( REPLY - 1 ))
   local chosen_ckpt="${checkpoints[$idx]}"
   local checkpoint="$ckpt_dir/$chosen_ckpt/pretrained_model"
-  echo "Using checkpoint: $chosen_ckpt"
+  echo "Using: $chosen_model / $chosen_ckpt"
 
   local base=$(echo "$DATASET" | sed 's|local/||')
   local repo="local/eval_${base}_run1"
@@ -421,22 +447,49 @@ pick_command() {
   row "2) train     train ACT policy"
   row "3) eval      run trained policy on robot"
   row "4) clean     delete data / model"
+  row "5) stop      kill all running lerobot processes"
   bot
   ask "Command (name or number)" ""
   case "$REPLY" in
     1|record) CMD="record" ;; 2|train) CMD="train" ;;
     3|eval)   CMD="eval"   ;; 4|clean) CMD="clean" ;;
+    5|stop)   CMD="stop"   ;;
     *) echo "Invalid: $REPLY"; exit 1 ;;
   esac
+}
+
+_run_stop() {
+  local pids
+  pids=$(ps aux | grep "lerobot.scripts" | grep -v grep | awk '{print $2}')
+  if [ -z "$pids" ]; then
+    echo "No lerobot processes running."
+  else
+    echo "Killing: $pids"
+    echo "$pids" | xargs kill -9 2>/dev/null
+    echo "Done."
+  fi
 }
 
 # ══════════════════════════════════════════════════════════
 # ENTRY POINT
 # ══════════════════════════════════════════════════════════
 
-COLOR="${1:-}"; CMD="${2:-}"; ARG3="${3:-}"
+COLOR="${1:-}"; CMD="${2:-}"; ARG3="${3:-}"; VERSION="${4:-v1}"
+
+# stop works without a color
+if [ "$COLOR" = "stop" ] || [ "$CMD" = "stop" ]; then
+  _run_stop; exit 0
+fi
+
 [ -z "$COLOR" ] && pick_color
 [ -z "$CMD" ]   && pick_command
+
+# Ask for version if not provided as arg
+if [ "$VERSION" = "v1" ] && [ -z "$4" ]; then
+  ask "Dataset/model version (e.g. v1, v2, v3)" "v1"
+  VERSION="$REPLY"
+fi
+
 set_color_config "$COLOR"
 
 case "$CMD" in
@@ -457,6 +510,8 @@ case "$CMD" in
     [[ "$ARG3" =~ ^[0-9]+$ ]] && _run_eval "" "$ARG3" || interactive_eval ;;
   clean)
     [ -n "$ARG3" ] && _run_clean "$ARG3" || interactive_clean ;;
+  stop)
+    _run_stop ;;
   *)
-    echo "Unknown command: $CMD. Valid: record, train, finetune, eval, clean"; exit 1 ;;
+    echo "Unknown command: $CMD. Valid: record, train, finetune, eval, clean, stop"; exit 1 ;;
 esac

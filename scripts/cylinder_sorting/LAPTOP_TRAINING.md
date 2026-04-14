@@ -115,7 +115,7 @@ python -m lerobot.scripts.lerobot_train \
   --job_name="$MODEL" \
   --steps=$STEPS \
   --save_freq=$SAVE_FREQ \
-  --batch_size=32 \
+  --batch_size=16 \
   --policy.optimizer_lr=1e-4 \
   --policy.optimizer_lr_backbone=1e-5 \
   --policy.use_amp=true \
@@ -125,10 +125,21 @@ python -m lerobot.scripts.lerobot_train \
 ```
 
 > `--dataset.video_backend=pyav` — matches the Jetson. torchcodec is not used on either machine.
-> `batch_size=32` — 5070 Ti has enough VRAM to double the Jetson's batch size of 16.
 > Checkpoints saved every 10,000 steps (10 total).
 > First batch is slow (~1-3 min) while CUDA JIT-compiles kernels for sm_120. Normal — speeds up after.
 > 100k steps ≈ 5 hrs on RTX 5070 Ti.
+
+### Blue model
+
+Same command, change:
+```bash
+DATASET="local/cylinder_sorting_blue_v1"
+MODEL="act_blue_v1"
+STEPS=100000
+```
+
+it> Before retraining, delete the old model to guarantee a fresh start:
+> `rm -rf ~/lerobot/outputs/train/act_blue_v1`
 
 ### Mixed model
 
