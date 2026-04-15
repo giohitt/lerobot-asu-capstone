@@ -179,4 +179,4 @@ outputs/
 *.part
 
 # Camera test images
-cam_*.jpg
+# cam_*.jpg
