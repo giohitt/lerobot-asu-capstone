@@ -161,6 +161,64 @@ _run_eval() {
     --policy.path="$checkpoint"
 }
 
+_run_sort_controller() {
+  # True inference controller — no recording, no dataset
+  # Accepts model paths as args, or auto-resolves from current MODEL variable
+  local green_path="${1:-}"
+  local blue_path="${2:-}"
+  local episode_time="${3:-30}"
+
+  # Auto-resolve paths from trained models if not supplied
+  local green_arg="" blue_arg=""
+  local green_model_dir="$LEROBOT_DIR/outputs/train/act_green_${VERSION}/checkpoints/last/pretrained_model"
+  local blue_model_dir="$LEROBOT_DIR/outputs/train/act_blue_${VERSION}/checkpoints/last/pretrained_model"
+
+  # Allow laptop-trained model names too (e.g. act_green_v1_laptop_100k)
+  # Use glob to find the most-recently-modified matching model
+  _find_model() {
+    local color="$1"
+    local ver="$2"
+    local base="$LEROBOT_DIR/outputs/train"
+    # Exact match first, then any name containing color+version
+    local exact="$base/act_${color}_${ver}/checkpoints/last/pretrained_model"
+    if [ -d "$exact" ]; then echo "$exact"; return; fi
+    local found
+    found=$(ls -dt "$base"/act_"${color}"_"${ver}"*/checkpoints/last/pretrained_model 2>/dev/null | head -1)
+    echo "${found:-}"
+  }
+
+  [ -z "$green_path" ] && green_path=$(_find_model green "$VERSION")
+  [ -z "$blue_path"  ] && blue_path=$(_find_model  blue  "$VERSION")
+
+  [ -n "$green_path"  ] && [ -d "$green_path"  ] && green_arg="--model_green  $green_path"
+  [ -n "$blue_path"   ] && [ -d "$blue_path"   ] && blue_arg="--model_blue   $blue_path"
+
+  if [ -z "$green_arg" ] && [ -z "$blue_arg" ]; then
+    echo "ERROR: No trained models found for version $VERSION."
+    echo "  Looked for: $green_model_dir"
+    echo "              $blue_model_dir"
+    echo "Run 'train' first, or pass model paths explicitly."
+    exit 1
+  fi
+
+  echo ""
+  echo "Starting sort controller (true inference — no recording)"
+  [ -n "$green_arg" ] && echo "  Green model : $green_path"
+  [ -n "$blue_arg"  ] && echo "  Blue model  : $blue_path"
+  echo "  Episode time: ${episode_time}s"
+  echo ""
+  echo "Place a cylinder in the detection zone and the arm will sort it."
+  echo "Press Ctrl+C to stop."
+  echo ""
+
+  PYTHONUNBUFFERED=1 $PYTHON -u \
+    "$LEROBOT_DIR/scripts/cylinder_sorting/sort_controller.py" \
+    $green_arg $blue_arg \
+    --episode_time "$episode_time" \
+    --robot_port /dev/ttyFOLLOWER \
+    --robot_id my_follower
+}
+
 _run_clean() {
   # $1=target (data|model|eval|all)
   local target="${1:-all}"
@@ -512,6 +570,20 @@ case "$CMD" in
     [ -n "$ARG3" ] && _run_clean "$ARG3" || interactive_clean ;;
   stop)
     _run_stop ;;
+  capture_home)
+    echo ""
+    top; row "CAPTURE HOME POSITION"; bot
+    echo ""
+    echo "  Move the arm to the desired neutral/home position,"
+    echo "  then press Enter to save it."
+    echo ""
+    read -p "  Ready? Press Enter..."
+    cd "$LEROBOT_DIR"
+    $PYTHON scripts/cylinder_sorting/sort_controller.py --capture_home
+    echo ""
+    echo "  Saved to scripts/cylinder_sorting/home_position.json"
+    echo "  The sort controller will now use this as the return target after each episode."
+    ;;
   *)
-    echo "Unknown command: $CMD. Valid: record, train, finetune, eval, clean, stop"; exit 1 ;;
+    echo "Unknown command: $CMD. Valid: record, train, finetune, eval, clean, stop, capture_home"; exit 1 ;;
 esac

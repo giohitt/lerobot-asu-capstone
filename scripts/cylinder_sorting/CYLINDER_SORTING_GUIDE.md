@@ -125,7 +125,7 @@ for i in range(10):
 for idx, (i, cap) in enumerate(working):
     ret, frame = cap.read()
     if ret:
-        path = f'/home/jetson23/lerobot/cam_{idx}_index{i}.jpg'
+        path = f'/home/jetson23/lerobot/outputs/captured_images/cam_{idx}_index{i}.jpg'
         cv2.imwrite(path, frame)
         print(f'Saved: {path}')
     cap.release()

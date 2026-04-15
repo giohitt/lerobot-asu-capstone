@@ -234,10 +234,11 @@ class OpenCVCamera(Camera):
         if self.fps is None:
             raise ValueError(f"{self} FPS is not set")
 
-        success = self.videocapture.set(cv2.CAP_PROP_FPS, float(self.fps))
+        self.videocapture.set(cv2.CAP_PROP_FPS, float(self.fps))
         actual_fps = self.videocapture.get(cv2.CAP_PROP_FPS)
-        # Use math.isclose for robust float comparison
-        if not success or not math.isclose(self.fps, actual_fps, rel_tol=1e-3):
+        # Use math.isclose for robust float comparison; ignore cap.set() return value
+        # since some V4L2 drivers on Jetson return False even when the setting took.
+        if not math.isclose(self.fps, actual_fps, rel_tol=1e-3):
             raise RuntimeError(f"{self} failed to set fps={self.fps} ({actual_fps=}).")
 
     def _validate_fourcc(self) -> None:
@@ -274,13 +275,13 @@ class OpenCVCamera(Camera):
         height_success = self.videocapture.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self.capture_height))
 
         actual_width = int(round(self.videocapture.get(cv2.CAP_PROP_FRAME_WIDTH)))
-        if not width_success or self.capture_width != actual_width:
+        if self.capture_width != actual_width:
             raise RuntimeError(
                 f"{self} failed to set capture_width={self.capture_width} ({actual_width=}, {width_success=})."
             )
 
         actual_height = int(round(self.videocapture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-        if not height_success or self.capture_height != actual_height:
+        if self.capture_height != actual_height:
             raise RuntimeError(
                 f"{self} failed to set capture_height={self.capture_height} ({actual_height=}, {height_success=})."
             )
