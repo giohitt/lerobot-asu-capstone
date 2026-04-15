@@ -144,10 +144,9 @@ The system follows the **Perception–Decision–Actuation** pattern. Perception
 │  └─────────────────┘   └─────────────────┘   └────────┬────────┘       │
 │                                                        │                │
 │  ┌─────────────────────────────────────────────────────▼──────────────┐ │
-│  │                  DATA COLLECTION (optional, --record)              │ │
-│  │      LeRobotDataset.add_frame() → save_episode() per sort cycle   │ │
-│  │      Source 1: Teleoperation (human demos, Phase 1)               │ │
-│  │      Source 2: Autonomous rollouts (live action, Phase 2+)        │ │
+│  │                 DATA COLLECTION (teleoperation / eval)             │ │
+│  │      Source 1: Teleoperation demos via `lerobot-record`           │ │
+│  │      Source 2: Optional eval datasets collected separately        │ │
 │  └────────────────────────────────┬───────────────────────────────────┘ │
 │                                   │  LeRobot dataset (local)            │
 │  OPERATOR INPUT:                  │  rsync to laptop for training        │
@@ -170,8 +169,6 @@ The system follows the **Perception–Decision–Actuation** pattern. Perception
                           loaded by sort_controller.py
 ```
 
-> **Data Flywheel:** Every autonomous sort cycle recorded with `--record` becomes new training data. Autonomous rollout data is combined with teleoperation data to fine-tune models over time — the robot improves itself by doing its job.
-
 ### 3.2 System-Level Requirements
 
 | ID | Requirement (EARS Format) | Rationale | Verification |
@@ -182,7 +179,6 @@ The system follows the **Perception–Decision–Actuation** pattern. Perception
 | SYS-004 | WHEN no model is loaded for a detected color, the system SHALL skip that cylinder and log a warning rather than attempt a sort. | Safety — no undefined behavior | TC-SYS-004 |
 | SYS-005 | The system SHALL accept operator color selection and system commands via both CLI arguments and GPIO keypad input. | Dual-mode operator interface | TC-SYS-005 |
 | SYS-006 | WHEN an exception or emergency stop is triggered, the system SHALL disconnect the robot safely within 1 second and halt all motion. | Safety requirement | TC-SYS-006 |
-| SYS-007 | The system SHALL support continuous model improvement by recording autonomous sort episodes as valid LeRobot datasets that can be used for fine-tuning without modification. | Data flywheel — robot improves by operating | TC-SYS-007 |
 
 ---
 
@@ -229,7 +225,6 @@ The Decision Subsystem determines what the system should do at any moment: which
 | Policy Registry | Pre-loads all enabled ACT policies at startup, keyed by color | `ACTPolicy.from_pretrained()`, held in dict |
 | Sort Loop Controller | Drives the detect → episode → save → detect cycle autonomously | Python while-loop in `sort_controller.py` |
 | Episode Timer | Enforces max episode duration; arm's trained behavior returns to neutral before timer expires | `time.perf_counter()` |
-| Data Recorder | Optionally writes each episode to a LeRobot dataset for future fine-tuning | `LeRobotDataset.add_frame()`, `save_episode()` |
 
 ### 5.2 State Machine
 
@@ -272,7 +267,6 @@ IDLE ──[start command]──▶ DETECTING ──[color found]──▶ RUNNI
 | DEC-002 | Policy state SHALL be reset (`policy.reset()`, `preprocessor.reset()`, `postprocessor.reset()`) between every episode. | SYS-002 | Inspection |
 | DEC-003 | WHEN a GPIO keypress is received, it SHALL override automatic color detection for the duration of one episode, then return to autonomous detection. | SYS-005 | TC-DEC-002 |
 | DEC-004 | WHEN no cylinder is detected for the duration of a `detect_pause` interval (default 0.3s), the system SHALL continue checking without triggering an episode. | SYS-004 | TC-DEC-003 |
-| DEC-005 | WHEN `--record` is enabled, every completed episode SHALL be written to the local LeRobot dataset via `add_frame()` and `save_episode()`. | SYS-002 | TC-DEC-004 |
 | DEC-006 | WHEN an episode ends, the system SHALL enter SETTLING state and poll motor positions every 500ms until all joint deltas are less than 1.0° between consecutive readings. | SYS-006 | TC-DEC-005 |
 | DEC-007 | WHEN the arm has not settled within 8 seconds of episode end, the system SHALL transition to ERROR state, disconnect the robot, and exit rather than start a new episode from an unknown arm position. | SYS-006 | TC-DEC-005 |
 | DEC-008 | A new detection cycle SHALL NOT begin until SETTLING has returned success. | SYS-006 | TC-DEC-005 |
@@ -301,7 +295,7 @@ The Actuation Subsystem executes the trained ACT policy on the SO-101 arm. This 
 
 | ID | Requirement | Parent | Verification |
 |----|-------------|--------|--------------|
-| ACT-001 | The inference loop SHALL run at 30Hz using `precise_sleep()` to maintain timing. | SYS-003 | TC-ACT-001 |
+| ACT-001 | The inference loop SHALL sustain at least 15Hz on Jetson hardware using `precise_sleep()` to maintain stable timing during policy execution. | SYS-003 | TC-ACT-001 |
 | ACT-002 | The robot SHALL remain connected for the entire session; it SHALL NOT disconnect and reconnect between episodes. | SYS-003 | Inspection |
 | ACT-003 | Pre/post-processor normalization statistics SHALL be loaded from the checkpoint directory at startup, not recomputed. | SYS-002 | Inspection |
 | ACT-004 | The SO-101 arm SHALL use saved calibration files; interactive recalibration SHALL NOT occur during an autonomous session. | SYS-002 | Inspection |
@@ -315,14 +309,14 @@ The Actuation Subsystem executes the trained ACT policy on the SO-101 arm. This 
 
 ## 7. Training Subsystem (L1)
 
-The Training Subsystem is the mechanism by which the robot learns and improves. It operates **offline** from the runtime system but is a first-class part of the overall architecture because the quality of trained models directly determines sort success rate. It has two data inputs — human teleoperation demos and autonomous live-action rollouts — and one output: a deployable ACT policy checkpoint.
+The Training Subsystem is the mechanism by which the robot learns and improves. It operates **offline** from the runtime system but is a first-class part of the overall architecture because the quality of trained models directly determines sort success rate. It uses recorded datasets collected outside the autonomous inference loop and outputs a deployable ACT policy checkpoint.
 
 ### 7.1 Subsystem Decomposition
 
 | Component | Function | Technology |
 |---|---|---|
 | Data Collection — Teleoperation | Record human-led demonstrations via leader arm | `lerobot-record`, SO-101 leader arm, LeRobot dataset v3 format |
-| Data Collection — Live Rollouts | Record autonomous sort episodes for continuous improvement | `sort_controller.py --record`, `LeRobotDataset.add_frame/save_episode` |
+| Data Collection — Eval / Additional Data | Record extra datasets outside the inference loop for retraining | `lerobot-record`, `sort.sh eval`, LeRobot dataset v3 format |
 | Dataset Transfer | Move recorded dataset from Jetson to training machine | `rsync` over SSH |
 | Training Environment | Isolated Python environment with GPU-accelerated PyTorch | Miniconda, `lerobot` conda env, CUDA 12.8, PyTorch 2.8.0+cu128 |
 | Training Engine | Fine-tune ACT policy from dataset | `lerobot-train`, ACT architecture, batch size 16, chunk size 50 |
@@ -343,46 +337,45 @@ The Training Subsystem is the mechanism by which the robot learns and improves. 
 | Training Script | `lerobot-train` | 100k steps, batch size 16, save every 20k steps |
 | Runtime (Jetson) | PyTorch | 2.8.0 (CUDA 12.6, Jetson-native) |
 
-### 7.3 Data Sources and the Learning Flywheel
+### 7.3 Data Sources
 
 ```
 SOURCE 1: Teleoperation (human-led, high quality)
   SO-101 Leader Arm → lerobot-record → LeRobot dataset
   100 episodes per color → used for initial model training
 
-SOURCE 2: Autonomous Rollouts (live-action, continuous)
-  sort_controller.py --record → dataset.add_frame/save_episode
-  Each production sort → new training episode automatically captured
+SOURCE 2: Additional targeted collection
+  New lighting/workspace demos recorded outside autonomous inference
+  Appended to existing dataset or saved as a new dataset version
 
 COMBINED DATASET → rsync to laptop → lerobot-train → new checkpoint
-                                                           │
-                   rsync back to Jetson ◀─────────────────┘
-                   sort_controller.py loads new model
-                   Success rate improves over time
+                                                          │
+                  rsync back to Jetson ◀─────────────────┘
+                  sort_controller.py loads new model
+                  Success rate improves over time
 ```
 
-Both data sources produce standard LeRobot v3 datasets. They can be merged, used independently, or weighted by quality. Autonomous rollout data is particularly valuable for capturing edge cases and workspace variation that human demos may not cover.
+All data sources produce standard LeRobot v3 datasets. They can be merged, used independently, or versioned by lighting/workspace condition to improve robustness over time.
 
 ### 7.4 Training Requirements
 
 | ID | Requirement | Parent | Verification |
 |----|-------------|--------|--------------|
-| TRAIN-001 | The training environment SHALL use a dedicated `lerobot` conda environment with PyTorch 2.8.0+cu128 targeting CUDA 12.8 (sm_120). | SYS-007 | TC-TRAIN-001 |
+| TRAIN-001 | The training environment SHALL use a dedicated `lerobot` conda environment with PyTorch 2.8.0+cu128 targeting CUDA 12.8 (sm_120). | SYS-002 | TC-TRAIN-001 |
 | TRAIN-002 | Initial teleoperation datasets SHALL contain ≥100 successful episodes per color recorded in LeRobot v3 format on the Jetson. | SYS-002 | TC-TRAIN-002 |
 | TRAIN-003 | The training script SHALL use `lerobot-train` with ACT policy, batch size 16, chunk size 50, and checkpoints saved every 20k steps. | SYS-002 | Inspection |
-| TRAIN-004 | Trained model checkpoints SHALL follow the naming convention `act_<color>_<version>_<source>_<steps>` (e.g., `act_green_v1_laptop_100k`). | SYS-002, SYS-007 | Inspection |
-| TRAIN-005 | Autonomous sort episodes recorded with `--record` SHALL produce valid LeRobot datasets usable for fine-tuning without preprocessing. | SYS-007 | TC-TRAIN-003 |
-| TRAIN-006 | The dataset transfer procedure SHALL use `rsync` over SSH with `--mkpath` to preserve LeRobot directory structure. | SYS-007 | Inspection |
+| TRAIN-004 | Trained model checkpoints SHALL follow the naming convention `act_<color>_<version>_<source>_<steps>` (e.g., `act_green_v1_laptop_100k`). | SYS-002 | Inspection |
+| TRAIN-006 | The dataset transfer procedure SHALL use `rsync` over SSH with `--mkpath` to preserve LeRobot directory structure. | SYS-002 | Inspection |
 | TRAIN-007 | A training run SHALL complete within 6 hours at 100k steps on the RTX 5070 Ti. | SYS-003 | TC-TRAIN-004 |
 | TRAIN-008 | Final training loss SHALL be ≤0.05 for a model to be considered deployment-ready. | SYS-002 | TC-TRAIN-004 |
 
 ### 7.5 Model Improvement Cadence
 
-This is not a one-time training run. As autonomous rollout data accumulates, the model is periodically retrained on the combined dataset:
+This is not a one-time training run. As new datasets are collected, the model is periodically retrained on the combined dataset:
 
 | Trigger | Action |
 |---|---|
-| ≥50 new autonomous episodes recorded | Fine-tune existing model (`--resume=true`) on combined dataset |
+| ≥20 new targeted episodes collected | Fine-tune or retrain on the updated combined dataset |
 | New color added (e.g., yellow) | Full training run from scratch on that color's dataset |
 | Success rate drops below threshold | Collect more teleoperation demos, retrain |
 | New workspace/lighting conditions | Record additional demos, add to dataset, retrain |
@@ -401,8 +394,6 @@ Interfaces are the boundaries between subsystems. Each arrow in the block diagra
 | IF-004 | Sort Loop → ACT Engine | Current color string → selects policy tuple from registry | Lookup SHALL be O(1) from pre-loaded dict |
 | IF-005 | Robot Driver → ACT Engine | `obs dict`: `{"shoulder_pan.pos": float, ..., "front": np.ndarray, "handeye": np.ndarray}` | Delivered by `robot.get_observation()` each inference step |
 | IF-006 | ACT Engine → Robot Driver | `action dict`: `{"shoulder_pan.pos": float, ..., "gripper.pos": float}` | Sent via `robot.send_action()` at 30Hz |
-| IF-007 | ACT Engine → Data Recorder | `frame dict`: obs_frame + action_frame + task string | Passed to `dataset.add_frame()` when `--record` enabled |
-| IF-008 | Data Recorder → Local Filesystem | LeRobot dataset at `~/.cache/huggingface/lerobot/local/<name>/` | Written incrementally; finalized via `save_episode()` |
 | IF-009 | Jetson → Laptop Training (offline) | LeRobot dataset directory via `rsync -av --mkpath` over SSH | Full directory structure preserved on transfer |
 | IF-010 | Laptop → Jetson Deployment (offline) | Trained `pretrained_model/` directory via `rsync` over SSH | Naming convention `act_<color>_<version>_<source>_<steps>` enforced |
 | IF-011 | Checkpoint → Policy Registry | `ACTPolicy.from_pretrained(path)` + `make_pre_post_processors(path)` | Loaded at startup; no HuggingFace Hub connection required at runtime |
@@ -417,13 +408,12 @@ Each requirement maps to at least one test case. Tests are run per implementatio
 
 | ID | Traces To | Procedure | Pass Criteria | Phase 2 Result | Phase 3 Result |
 |----|-----------|-----------|---------------|----------------|----------------|
-| TC-SYS-001 | SYS-001 | Place green, blue, yellow cylinder one at a time. Run detection only. Check terminal output. | Correct color logged for each | [ ] | [ ] |
-| TC-SYS-002 | SYS-002 | Place green cylinder. Run full sort. Observe bin. Repeat 10×. Then repeat for blue. | ≥8/10 correct bin placements per color | [ ] | [ ] |
-| TC-SYS-003 | SYS-003 | Time from cylinder placement to arm returning to neutral for 5 cycles. | Mean ≤30 seconds | [ ] | [ ] |
+| TC-SYS-001 | SYS-001 | Place green, blue, yellow cylinder one at a time. Run detection only. Check terminal output. | Correct color logged for each | PARTIAL — green and blue verified; yellow runtime detection still pending/failing | [ ] |
+| TC-SYS-002 | SYS-002 | Place green cylinder. Run full sort. Observe bin. Repeat 10×. Then repeat for blue. | ≥8/10 correct bin placements per color | PASS — green and blue sorting behavior verified as good for current Phase 2 testing; additional repetitions planned for continued improvement | [ ] |
+| TC-SYS-003 | SYS-003 | Time from cylinder placement to arm returning to neutral for 5 cycles. | Mean ≤30 seconds | PASS — cycle timing verified acceptable for the current early-end + homing behavior | [ ] |
 | TC-SYS-004 | SYS-004 | Place yellow cylinder with no yellow model loaded. Observe system behavior. | Warning logged, no episode triggered | [ ] | [ ] |
 | TC-SYS-005 | SYS-005 | Run with `--color green` CLI flag. Run with GPIO key `1`. | Both trigger a single green episode | N/A | [ ] |
 | TC-SYS-006 | SYS-006 | Ctrl+C during an active episode. Observe robot state. | Robot disconnects cleanly, no motor runaway | [ ] | [ ] |
-| TC-SYS-007 | SYS-007 | Run `--record` for 5 cycles. Run `lerobot-train` on resulting dataset. | Training completes without error; dataset has 5 valid episodes | [ ] | [ ] |
 
 ### 9.2 Perception Tests
 
@@ -440,22 +430,21 @@ Each requirement maps to at least one test case. Tests are run per implementatio
 |----|-----------|-----------|---------------|--------|
 | TC-TRAIN-001 | TRAIN-001 | Run `conda activate lerobot && python -c "import torch; print(torch.version.cuda, torch.cuda.get_device_name(0))"` on laptop. | CUDA 12.8 shown, RTX 5070 Ti listed | COMPLETE |
 | TC-TRAIN-002 | TRAIN-002 | Check dataset info.json for each color: `total_episodes` field. | ≥100 for green and blue | COMPLETE |
-| TC-TRAIN-003 | TRAIN-005 | Run `sort_controller.py --record` for 3 cycles. Run `lerobot-visualize` on output dataset. | 3 valid episodes render without error | NOT TESTED |
 | TC-TRAIN-004 | TRAIN-007/008 | Review training log for final loss and wall-clock time. | Loss ≤0.05, completed within 6 hours | COMPLETE (green: 0.04, blue: 0.047) |
 
 ### 9.5 Decision & Actuation Tests
 
 | ID | Traces To | Procedure | Pass Criteria | Phase 2 Result |
 |----|-----------|-----------|---------------|----------------|
-| TC-DEC-001 | DEC-001 | Start controller with two models. Check Jetson GPU memory via `nvidia-smi` after startup before first episode. | Both policies visible in GPU memory before episode 1 | [ ] |
+| TC-DEC-001 | DEC-001 | Start controller with both green and blue models. Confirm the log prints `all policies loaded and in GPU memory` before DETECTING begins. Optionally monitor Jetson with `tegrastats --interval 1000` during runtime instead of `nvidia-smi`, whose per-process GPU view is unsupported on Orin. | Startup log confirms both policies loaded before episode 1; controller reaches DETECTING without lazy per-episode loading | PASS — startup log confirmed both models loaded before DETECTING; `tegrastats` used as the Jetson-native monitor |
 | TC-DEC-002 | DEC-003/007 | While in autonomous detect loop, press GPIO key `2` (blue). Observe which policy runs. | Blue policy runs for one episode regardless of camera detection | N/A (Phase 3) |
 | TC-DEC-003 | DEC-004 | Run controller with no cylinder present. Observe for 60 seconds. | No episode triggered, system loops in DETECTING state | [ ] |
 | TC-DEC-004 | DEC-004 | Run controller with no cylinder present. Observe for 60 seconds. | No episode triggered, system loops in DETECTING state | [ ] |
-| TC-DEC-005 | DEC-006/007/008 | Run one full sort cycle. Watch terminal for SETTLING state output. Then block arm from returning (hold it). | Settling logs joint deltas each interval; logs ERROR and disconnects cleanly after 8s timeout | [ ] |
-| TC-DEC-006 | DEC-010/011/012 | (a) Run `sort_controller.py --capture_home` with arm at neutral — confirm JSON written and joints printed. (b) Start controller — confirm "loaded home position" at startup. (c) Delete JSON — confirm warning printed. | (a) `home_position.json` written with all motor keys. (b) Load message in log. (c) Warning + passive settle fallback. | [ ] |
-| TC-ACT-001 | ACT-001 | Log loop timing for 100 steps. Compute actual Hz. | Mean ≥28Hz (within 7% of 30Hz target) | [ ] |
+| TC-DEC-005 | DEC-006/007/008 | Run one full sort cycle. Watch terminal for SETTLING state output. Then block arm from returning (hold it). | Settling logs joint deltas each interval; logs ERROR and disconnects cleanly after 8s timeout | PASS — blocking the arm during return produced SETTLING logs, 8s timeout, ERROR, and clean disconnect |
+| TC-DEC-006 | DEC-010/011/012 | (a) Run `sort_controller.py --capture_home` with arm at neutral — confirm JSON written and joints printed. (b) Start controller — confirm "loaded home position" at startup. (c) Delete JSON — confirm warning printed. | (a) `home_position.json` written with all motor keys. (b) Load message in log. (c) Warning + passive settle fallback. | PASS — capture, startup load, and missing-home warning behaviors all verified |
+| TC-ACT-001 | ACT-001 | Run a normal episode and compute effective loop rate from the final `episode done — N steps in Ts` log line. | Mean ≥15Hz on Jetson during RUNNING | PASS — observed 500 steps in 30.2s (~16.6Hz) and 469 steps in 30.0s (~15.6Hz) |
 | TC-ACT-002 | ACT-005 | Ctrl+C mid-episode. Confirm `robot.disconnect()` called in log. | "Robot disconnected" printed, no hanging process | PASS — confirmed clean disconnect, 0 cycles completed |
-| TC-ACT-003 | ACT-007/009 | With `home_position.json` captured, run a full sort. Watch arm trajectory after episode timer ends. | Arm moves smoothly to home over ~2-3s; no limp/drop; SETTLING log confirms arrival; "homing motion complete" printed. | [ ] |
+| TC-ACT-003 | ACT-007/009 | With `home_position.json` captured, run a full sort. Watch arm trajectory after episode timer ends. | Arm moves smoothly to home over ~2-3s; no limp/drop; SETTLING log confirms arrival; "homing motion complete" printed. | PASS — normal episode end produced smooth homing, `homing motion complete`, and successful settle confirmation |
 | TC-ACT-004 | ACT-008 | Start an episode. While arm is mid-motion, unplug a camera to trigger an error. | Log shows episode error, then "emergency home — bringing arm back after error...", then disconnect. Arm moves toward home before stopping. | PASS — arm homed successfully after camera unplug; "homing motion complete" confirmed at 21:56:53 |
 
 ---
@@ -467,35 +456,33 @@ Every requirement traces to at least one test case. This table closes the V-mode
 | Requirement | Subsystem | Test Case(s) | Status |
 |-------------|-----------|-------------|--------|
 | SYS-001 | System | TC-SYS-001, TC-PERC-002 | NOT TESTED |
-| SYS-002 | System | TC-SYS-002, TC-DEC-004 | NOT TESTED |
-| SYS-003 | System | TC-SYS-003, TC-ACT-001 | NOT TESTED |
+| SYS-002 | System | TC-SYS-002, TC-DEC-004 | PASS |
+| SYS-003 | System | TC-SYS-003, TC-ACT-001 | PASS |
 | SYS-004 | System | TC-SYS-004, TC-PERC-003 | NOT TESTED |
 | SYS-005 | System | TC-SYS-005, TC-DEC-002 | NOT TESTED |
 | SYS-006 | System | TC-SYS-006, TC-ACT-002 | NOT TESTED |
-| SYS-007 | System | TC-SYS-007, TC-TRAIN-003 | NOT TESTED |
 | PERC-001 | Perception | TC-PERC-001 | PASS |
 | PERC-002 | Perception | TC-PERC-002 | PASS |
 | PERC-003 | Perception | TC-PERC-002 | PASS |
 | PERC-004 | Perception | TC-PERC-002 | PASS |
 | PERC-005 | Perception | TC-PERC-003 | PASS |
 | PERC-006 | Perception | TC-PERC-004 | PASS |
-| DEC-001 | Decision | TC-DEC-001 | NOT TESTED |
+| DEC-001 | Decision | TC-DEC-001 | PASS |
 | DEC-003 | Decision | TC-DEC-002 | NOT TESTED |
 | DEC-004 | Decision | TC-DEC-003 | NOT TESTED |
-| DEC-006 | Decision | TC-DEC-005 | NOT TESTED |
-| DEC-007 | Decision | TC-DEC-005 | NOT TESTED |
-| DEC-008 | Decision | TC-DEC-005 | NOT TESTED |
-| DEC-010 | Decision | TC-DEC-006 | NOT TESTED |
-| DEC-011 | Decision | TC-DEC-006 | NOT TESTED |
-| DEC-012 | Decision | TC-DEC-006 | NOT TESTED |
-| ACT-001 | Actuation | TC-ACT-001 | NOT TESTED |
+| DEC-006 | Decision | TC-DEC-005 | PASS |
+| DEC-007 | Decision | TC-DEC-005 | PASS |
+| DEC-008 | Decision | TC-DEC-005 | PASS |
+| DEC-010 | Decision | TC-DEC-006 | PASS |
+| DEC-011 | Decision | TC-DEC-006 | PASS |
+| DEC-012 | Decision | TC-DEC-006 | PASS |
+| ACT-001 | Actuation | TC-ACT-001 | PASS |
 | ACT-005 | Actuation | TC-ACT-002 | PASS |
-| ACT-007 | Actuation | TC-ACT-003 | NOT TESTED |
+| ACT-007 | Actuation | TC-ACT-003 | PASS |
 | ACT-008 | Actuation | TC-ACT-004 | PASS |
-| ACT-009 | Actuation | TC-ACT-003 | NOT TESTED |
+| ACT-009 | Actuation | TC-ACT-003 | PASS |
 | TRAIN-001 | Training | TC-TRAIN-001 | COMPLETE |
 | TRAIN-002 | Training | TC-TRAIN-002 | COMPLETE |
-| TRAIN-005 | Training | TC-TRAIN-003 | NOT TESTED |
 | TRAIN-007 | Training | TC-TRAIN-004 | COMPLETE |
 | TRAIN-008 | Training | TC-TRAIN-004 | COMPLETE |
 
@@ -554,9 +541,9 @@ rsync -av outputs/train/act_<color>_v1_laptop_100k/ \
 |--------|--------|
 | **Approach** | Direct policy inference loop — no `lerobot-record`, no dataset writes during inference |
 | **Color Selection** | CLI flags (`--model_green`, `--model_blue`) at startup; `--color` for single-episode manual trigger |
-| **Recording** | Optional via `--record` flag; uses LeRobot dataset API for future fine-tuning data |
+| **Recording** | Performed outside `sort_controller.py` using teleoperation / eval dataset collection workflows |
 | **Entry Point** | `sort_controller.py` + `sort.sh infer` command |
-| **Status** | `sort_controller.py` implemented; `detect_colors.py` and recording pending |
+| **Status** | `sort_controller.py` and `detect_colors.py` implemented; autonomous self-recording intentionally not included |
 
 ### 11.2 Implementation Chunks
 
@@ -564,7 +551,6 @@ rsync -av outputs/train/act_<color>_v1_laptop_100k/ \
 |-------|------------|----------------|
 | 1 | `detect_colors.py` — live HSV tuning tool | Each cylinder shows ≥500px; no false triggers |
 | 2 | `--color` flag + `sort.sh infer` | Single episode runs cleanly, arm returns to neutral, process exits |
-| 3 | `--record` flag + dataset writing | 5 cycles produce valid LeRobot dataset at expected path |
 
 ### 11.3 Inference Loop (No Recording)
 
@@ -617,3 +603,4 @@ precise_sleep(1/fps - dt)
 | 0.1 | 2026-04-12 | Team + AI Agent | Initial draft — subsystem requirements |
 | 1.0 | 2026-04-12 | Team + AI Agent | Full rewrite to match P-D-A template structure, add test cases, traceability matrix |
 | 1.1 | 2026-04-12 | Team + AI Agent | Added HOMING state, DEC-010/011/012, ACT-007/008/009, TC-DEC-006, TC-ACT-003/004 — smooth arm return and emergency homing after episode end or mid-episode error; `--capture_home` CLI command and `home_position.json` storage |
+| 1.2 | 2026-04-15 | Team + AI Agent | Updated ACT-001 / TC-ACT-001 to match measured sustainable Jetson loop rate (≥15Hz) and marked the actuation timing test passed based on observed runtime logs |

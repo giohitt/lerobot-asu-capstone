@@ -75,8 +75,8 @@ MIN_BLOB_PIXELS = {
 # Region of Interest — only look for cylinders inside this rectangle.
 # Crops out table edges, shadows, and background clutter.
 # Format: (x_start, y_start, x_end, y_end) as fractions of frame size (0.0-1.0)
-# Default covers the centre 60% of the frame. Tune with detect_colors.py snapshots.
-ROI = (0.1, 0.1, 0.9, 0.9)  # (left, top, right, bottom)
+# Default focuses on the centre workspace and excludes more of the side bins.
+ROI = (0.25, 0.1, 0.75, 0.9)  # (left, top, right, bottom)
 
 # Settling — how still the arm must be to count as "home"
 # Units match the robot's position units (degrees when use_degrees=True, else normalized)
@@ -124,22 +124,35 @@ def largest_blob(mask: np.ndarray) -> int:
     return int(max(cv2.contourArea(c) for c in contours))
 
 
-def detect_color(frame_bgr: np.ndarray, enabled_colors: list[str]) -> str | None:
+def color_blob_area(frame_rgb: np.ndarray, color: str) -> int:
+    """Return the largest ROI blob area for one color from an RGB robot observation."""
+    cfg = COLOR_HSV.get(color)
+    if cfg is None:
+        return 0
+    roi_frame = apply_roi(frame_rgb)
+    hsv = cv2.cvtColor(roi_frame, cv2.COLOR_RGB2HSV)
+    mask = cv2.inRange(hsv, cfg["lower"], cfg["upper"])
+    return largest_blob(mask)
+
+
+def color_is_detected(frame_rgb: np.ndarray, color: str) -> bool:
+    """Return True when the requested color exceeds its blob threshold in the ROI."""
+    threshold = MIN_BLOB_PIXELS[color] if isinstance(MIN_BLOB_PIXELS, dict) else MIN_BLOB_PIXELS
+    return color_blob_area(frame_rgb, color) > threshold
+
+
+def detect_color(frame_rgb: np.ndarray, enabled_colors: list[str]) -> str | None:
     """
     Return the enabled color whose largest contiguous blob beats its threshold, or None.
     Uses largest-contour area instead of total pixels — scattered background noise
     produces many tiny blobs that don't count; a real cylinder is one large blob.
+    Robot observations come from LeRobot OpenCV cameras in RGB format, so the
+    HSV conversion here must start from RGB rather than raw OpenCV BGR.
     """
-    roi_frame = apply_roi(frame_bgr)
-    hsv = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2HSV)
     best_color, best_area = None, 0
 
     for color in enabled_colors:
-        cfg = COLOR_HSV.get(color)
-        if cfg is None:
-            continue
-        mask      = cv2.inRange(hsv, cfg["lower"], cfg["upper"])
-        area      = largest_blob(mask)
+        area = color_blob_area(frame_rgb, color)
         threshold = MIN_BLOB_PIXELS[color] if isinstance(MIN_BLOB_PIXELS, dict) else MIN_BLOB_PIXELS
         if area > threshold and area > best_area:
             best_area, best_color = area, color
@@ -175,8 +188,14 @@ def load_policy(checkpoint_path: str | Path, device: torch.device):
 HOME_POS_FILE = Path(__file__).parent / "home_position.json"
 
 # Homing motion parameters
-HOME_STEPS    = 80    # interpolation steps (~2.7s at 30ms each)
+HOME_PIVOT_STEPS = 30  # ~1.0s pivot-clear phase before descending home
+HOME_RETURN_STEPS = 50  # ~1.7s final move to home
 HOME_STEP_S   = 0.033 # seconds between each interpolation step
+HOME_RELEASE_GRIPPER_POS = 50.0  # mid-open release during homing; 0=closed, 100=open
+HOME_PIVOT_JOINTS = (
+    "shoulder_pan.pos",
+    "wrist_roll.pos",
+)
 
 
 def load_home_position() -> dict | None:
@@ -210,19 +229,49 @@ def get_motor_positions(robot: SO101Follower) -> dict:
 
 def smooth_home(robot: SO101Follower, home_pos: dict) -> None:
     """
-    Smoothly interpolate from current arm position to home_pos over HOME_STEPS steps.
-    Sends position commands at ~30Hz so the arm moves steadily rather than snapping.
+    Smoothly return to home in two phases:
+    1. Pivot clear first while holding the arm's height geometry close to its current
+       pose, so it does not descend diagonally through nearby objects/bins.
+    2. Move from the cleared waypoint to the final home pose.
+
+    The gripper is held half-open during the motion so objects are released
+    reliably before the arm sweeps home.
     """
     log_state(State.SETTLING, "returning arm to home position...")
     current = get_motor_positions(robot)
+    release_gripper = None
+    if "gripper.pos" in current:
+        # Open enough to reliably release the object, but not fully max-open.
+        release_gripper = max(current["gripper.pos"], HOME_RELEASE_GRIPPER_POS)
 
-    for i in range(1, HOME_STEPS + 1):
-        t      = i / HOME_STEPS                          # 0 → 1
-        # ease-in-out: smooth start and end, faster in the middle
-        t_ease = t * t * (3.0 - 2.0 * t)
-        target = {k: current[k] + t_ease * (home_pos[k] - current[k]) for k in home_pos}
-        robot.send_action(target)
-        time.sleep(HOME_STEP_S)
+    def _send_interpolated(start_pos: dict, end_pos: dict, steps: int) -> None:
+        for i in range(1, steps + 1):
+            t      = i / steps
+            t_ease = t * t * (3.0 - 2.0 * t)
+            target = {k: start_pos[k] + t_ease * (end_pos[k] - start_pos[k]) for k in end_pos}
+            if release_gripper is not None:
+                target["gripper.pos"] = release_gripper
+            robot.send_action(target)
+            time.sleep(HOME_STEP_S)
+
+    # Phase 1: pivot shoulder pan / wrist roll toward home while keeping the main
+    # arm geometry near its current pose, so the arm clears sideways first instead
+    # of descending through the workspace on a diagonal.
+    pivot_pose = current.copy()
+    for joint in HOME_PIVOT_JOINTS:
+        if joint in current and joint in home_pos:
+            pivot_pose[joint] = home_pos[joint]
+    if release_gripper is not None:
+        pivot_pose["gripper.pos"] = release_gripper
+
+    log_state(State.SETTLING, "opening gripper and pivoting clear before final home...")
+    _send_interpolated(current, pivot_pose, HOME_PIVOT_STEPS)
+
+    # Phase 2: once clear of the workspace, move the full arm down to home.
+    final_pose = dict(home_pos)
+    if release_gripper is not None:
+        final_pose["gripper.pos"] = release_gripper
+    _send_interpolated(pivot_pose, final_pose, HOME_RETURN_STEPS)
 
     log_state(State.SETTLING, "homing motion complete")
 
@@ -282,9 +331,13 @@ def run_sort_episode(
     postprocessor,
     ds_features:    dict,
     device:         torch.device,
+    target_color:   str,
     episode_time_s: float,
     fps:            int,
     task:           str,
+    end_on_target_clear: bool = True,
+    target_clear_min_runtime_s: float = 8.0,
+    target_clear_hold_s: float = 1.0,
     home_pos:       dict | None = None,
 ) -> None:
     """
@@ -308,6 +361,7 @@ def run_sort_episode(
     start_t   = time.perf_counter()
     step      = 0
     timestamp = 0.0
+    target_missing_since = None
 
     try:
         while timestamp < episode_time_s:
@@ -329,6 +383,23 @@ def run_sort_episode(
 
             action = make_robot_action(action_tensor, ds_features)
             robot.send_action(action)
+
+            front_frame = obs.get("front")
+            if end_on_target_clear and front_frame is not None and timestamp >= target_clear_min_runtime_s:
+                if color_is_detected(front_frame, target_color):
+                    target_missing_since = None
+                else:
+                    now = time.perf_counter()
+                    if target_missing_since is None:
+                        target_missing_since = now
+                    elif now - target_missing_since >= target_clear_hold_s:
+                        print("─" * 60, flush=True)
+                        log_state(
+                            State.RUNNING,
+                            f"target cleared from ROI — ending episode early at {timestamp:.1f}s"
+                        )
+                        print("─" * 60, flush=True)
+                        break
 
             dt        = time.perf_counter() - loop_t
             precise_sleep(max(0.0, 1.0 / fps - dt))
@@ -456,6 +527,10 @@ def main() -> None:
                         help="Seconds between detection checks when no cylinder found (default: 0.3)")
     parser.add_argument("--post_settle_pause",  type=float, default=1.0,
                         help="Extra pause after settling before next detection (default: 1.0)")
+    parser.add_argument("--target_clear_min_time", type=float, default=8.0,
+                        help="Earliest time in seconds to allow early episode end once the target leaves the ROI (default: 8.0)")
+    parser.add_argument("--target_clear_hold", type=float, default=1.0,
+                        help="Seconds the target color must stay absent from the ROI before early homing/end triggers (default: 1.0)")
 
     # Robot
     parser.add_argument("--robot_port", type=str, default="/dev/ttyFOLLOWER")
@@ -605,9 +680,12 @@ def main() -> None:
                 postprocessor=postprocessor,
                 ds_features=ds_features,
                 device=device,
+                target_color=detected,
                 episode_time_s=args.episode_time,
                 fps=args.fps,
                 task=task,
+                target_clear_min_runtime_s=args.target_clear_min_time,
+                target_clear_hold_s=args.target_clear_hold,
                 home_pos=home_pos,
             )
 
@@ -631,6 +709,15 @@ def main() -> None:
 
     except KeyboardInterrupt:
         log_state(State.IDLE, f"stopped by user — {cycles} cycle(s) completed")
+        if home_pos is not None:
+            log_state(State.SETTLING, "Ctrl+C received — returning arm to home before exit...")
+            _cam_log.setLevel(logging.ERROR)
+            try:
+                smooth_home(robot, home_pos)
+            except Exception as home_err:
+                log_state(State.ERROR, f"Ctrl+C homing failed: {home_err}")
+            finally:
+                _cam_log.setLevel(logging.WARNING)
     except Exception as e:
         log_state(State.ERROR, f"unhandled exception: {e}")
         raise

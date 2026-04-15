@@ -62,7 +62,7 @@ MIN_BLOB_PIXELS = {
 
 # Region of Interest — fraction of frame (left, top, right, bottom)
 # Must match sort_controller.py ROI exactly
-ROI = (0.1, 0.1, 0.9, 0.9)
+ROI = (0.25, 0.1, 0.75, 0.9)
 
 SNAPSHOT_DIR = Path("/home/jetson23/lerobot/outputs/captured_images")
 
@@ -110,6 +110,22 @@ def apply_roi(frame_bgr: np.ndarray) -> np.ndarray:
     return frame_bgr[y0:y1, x0:x1]
 
 
+def get_roi_bounds(frame_bgr: np.ndarray) -> tuple[int, int, int, int]:
+    """Return ROI bounds as absolute pixel coordinates."""
+    h, w = frame_bgr.shape[:2]
+    x0, y0 = int(ROI[0] * w), int(ROI[1] * h)
+    x1, y1 = int(ROI[2] * w), int(ROI[3] * h)
+    return x0, y0, x1, y1
+
+
+def draw_roi_box(frame_bgr: np.ndarray) -> np.ndarray:
+    """Draw the active ROI rectangle so the visualizer matches runtime detection."""
+    out = frame_bgr.copy()
+    x0, y0, x1, y1 = get_roi_bounds(frame_bgr)
+    cv2.rectangle(out, (x0, y0), (x1, y1), (255, 255, 255), 2)
+    return out
+
+
 def _largest_blob(mask: np.ndarray) -> int:
     """Return the area of the single largest contiguous blob in the mask."""
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -129,39 +145,56 @@ def get_pixel_counts(frame_bgr: np.ndarray) -> dict[str, int]:
 
 
 def get_mask_bgr(frame_bgr: np.ndarray, color: str) -> np.ndarray:
-    hsv  = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, COLOR_HSV[color]["lower"], COLOR_HSV[color]["upper"])
-    return cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    x0, y0, x1, y1 = get_roi_bounds(frame_bgr)
+    roi = frame_bgr[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    roi_mask = cv2.inRange(hsv, COLOR_HSV[color]["lower"], COLOR_HSV[color]["upper"])
+    mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+    mask[y0:y1, x0:x1] = roi_mask
+    out = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+    cv2.rectangle(out, (x0, y0), (x1, y1), (255, 255, 255), 2)
+    return out
 
 
 def get_all_overlay(frame_bgr: np.ndarray) -> np.ndarray:
     overlay = frame_bgr.copy()
-    hsv     = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    x0, y0, x1, y1 = get_roi_bounds(frame_bgr)
+    roi = frame_bgr[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    roi_overlay = overlay[y0:y1, x0:x1]
     for color, cfg in COLOR_HSV.items():
         mask = cv2.inRange(hsv, cfg["lower"], cfg["upper"])
-        overlay[mask > 0] = OVERLAY_COLORS[color]
+        roi_overlay[mask > 0] = OVERLAY_COLORS[color]
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (255, 255, 255), 2)
     return overlay
 
 
 def draw_contours(frame_bgr: np.ndarray) -> np.ndarray:
     """Draw detection outlines on the raw frame for each active color."""
-    out = frame_bgr.copy()
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    out = draw_roi_box(frame_bgr)
+    x0, y0, x1, y1 = get_roi_bounds(frame_bgr)
+    roi = frame_bgr[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     for color, cfg in COLOR_HSV.items():
         mask       = cv2.inRange(hsv, cfg["lower"], cfg["upper"])
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         thresh = MIN_BLOB_PIXELS[color] if isinstance(MIN_BLOB_PIXELS, dict) else MIN_BLOB_PIXELS
         if contours and int(max(cv2.contourArea(c) for c in contours)) >= thresh:
-            cv2.drawContours(out, contours, -1, OVERLAY_COLORS[color], 2)
+            shifted = [c + np.array([[[x0, y0]]], dtype=c.dtype) for c in contours]
+            cv2.drawContours(out, shifted, -1, OVERLAY_COLORS[color], 2)
     return out
 
 
 def save_snapshots(frame_bgr: np.ndarray) -> None:
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(SNAPSHOT_DIR / "snap_raw.jpg"), frame_bgr)
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    cv2.imwrite(str(SNAPSHOT_DIR / "snap_raw.jpg"), draw_roi_box(frame_bgr))
+    x0, y0, x1, y1 = get_roi_bounds(frame_bgr)
+    roi = frame_bgr[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     for color, cfg in COLOR_HSV.items():
-        mask = cv2.inRange(hsv, cfg["lower"], cfg["upper"])
+        roi_mask = cv2.inRange(hsv, cfg["lower"], cfg["upper"])
+        mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
+        mask[y0:y1, x0:x1] = roi_mask
         cv2.imwrite(str(SNAPSHOT_DIR / f"snap_mask_{color}.jpg"), mask)
     print(f"  → snapshots saved to {SNAPSHOT_DIR}/snap_*.jpg")
 
@@ -296,8 +329,8 @@ def main() -> None:
             bar    = np.zeros((40, 1280, 3), dtype=np.uint8)
             cv2.putText(
                 bar,
-                f"  G:{counts['green']:5d}px  B:{counts['blue']:5d}px  "
-                f"Y:{counts['yellow']:5d}px  |  {status}  |  [{active}]  g/b/y/a/s/q",
+                f"  G:{counts['green']:5d}blob  B:{counts['blue']:5d}blob  "
+                f"Y:{counts['yellow']:5d}blob  |  {status}  |  [{active}]  g/b/y/a/s/q",
                 (4, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA,
             )
             combined = np.vstack([np.hstack([left, right]), bar])
