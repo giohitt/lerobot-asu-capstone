@@ -150,6 +150,15 @@ MODEL="act_mixed_v1"
 STEPS=100000
 ```
 
+### Before retraining — delete old model first
+
+lerobot throws `FileExistsError` if the output dir already exists. Always delete before a fresh run:
+
+```bash
+MODEL="act_blue_v1"   # change as needed
+rm -rf ~/lerobot/outputs/train/$MODEL
+```
+
 ### Watch loss during training
 
 Open a second WSL2 terminal and run:
@@ -163,14 +172,40 @@ Open a second WSL2 terminal and run:
 
 ## 4. Copy Model Back to Jetson
 
-Run this **in WSL2** when training is done:
+Run this **in WSL2** when training is done. Set `MODEL` to match what you trained.
+
+### Last checkpoint only (fast, ~200MB — sufficient for eval)
 
 ```bash
 JETSON_IP=192.168.0.165
+MODEL="act_green_v1"   # change to act_blue_v1, act_mixed_v1, etc.
 
-rsync -avz --progress \
-  ~/lerobot/outputs/train/act_green_v1/checkpoints/last/pretrained_model/ \
-  jetson23@$JETSON_IP:~/lerobot/outputs/train/act_green_v1/checkpoints/last/pretrained_model/
+rsync -avz --mkpath --progress \
+  ~/lerobot/outputs/train/$MODEL/checkpoints/last/pretrained_model/ \
+  jetson23@$JETSON_IP:~/lerobot/outputs/train/$MODEL/checkpoints/last/pretrained_model/
+```
+
+### All checkpoints (full copy, ~2GB — keeps every 10k step snapshot)
+
+```bash
+JETSON_IP=192.168.0.165
+MODEL="act_green_v1"   # change to act_blue_v1, act_mixed_v1, etc.
+
+rsync -avz --mkpath --progress \
+  ~/lerobot/outputs/train/$MODEL/ \
+  jetson23@$JETSON_IP:~/lerobot/outputs/train/$MODEL/
+```
+
+### Copy with a named version (avoids overwriting existing models)
+
+```bash
+JETSON_IP=192.168.0.165
+MODEL="act_green_v1"
+DEST_NAME="act_green_v1_laptop_100k"   # give it a clear name
+
+rsync -avz --mkpath --progress \
+  ~/lerobot/outputs/train/$MODEL/ \
+  jetson23@$JETSON_IP:~/lerobot/outputs/train/$DEST_NAME/
 ```
 
 The Jetson eval script always looks at `checkpoints/last/pretrained_model/` — no config changes needed.
