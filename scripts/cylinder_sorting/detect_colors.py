@@ -42,15 +42,27 @@ import numpy as np
 # HSV ranges — tune here, then paste final values into sort_controller.py
 # ─────────────────────────────────────────────────────────────────────────────
 COLOR_HSV = {
-    "green":  {"lower": np.array([35,  80,  50],  dtype=np.uint8),
+    "green":  {"lower": np.array([35,  60,  40],  dtype=np.uint8),
                "upper": np.array([85,  255, 255], dtype=np.uint8)},
-    "blue":   {"lower": np.array([100, 80,  50],  dtype=np.uint8),
-               "upper": np.array([130, 255, 255], dtype=np.uint8)},
-    "yellow": {"lower": np.array([20,  100, 100], dtype=np.uint8),
-               "upper": np.array([35,  255, 255], dtype=np.uint8)},
+    "blue":   {"lower": np.array([95,  50,  40],  dtype=np.uint8),
+               "upper": np.array([135, 255, 255], dtype=np.uint8)},
+    # Arm/cream is H~20-30 but S<60; shadows are V<80; pastel yellow should be S>=90, V>=90
+    "yellow": {"lower": np.array([18,  90,  90],  dtype=np.uint8),
+               "upper": np.array([38,  255, 255], dtype=np.uint8)},
 }
 
-MIN_BLOB_PIXELS = 1500  # must match sort_controller.py
+# Minimum area of the LARGEST single contiguous blob to count as a real cylinder.
+# Scattered background noise = many tiny blobs; real cylinder = one large blob.
+# Must match sort_controller.py MIN_BLOB_PIXELS.
+MIN_BLOB_PIXELS = {
+    "green":  600,
+    "blue":   600,
+    "yellow": 600,
+}
+
+# Region of Interest — fraction of frame (left, top, right, bottom)
+# Must match sort_controller.py ROI exactly
+ROI = (0.1, 0.1, 0.9, 0.9)
 
 SNAPSHOT_DIR = Path("/home/jetson23/lerobot/outputs/captured_images")
 
@@ -91,10 +103,27 @@ def has_display_support() -> bool:
 # Vision utilities
 # ─────────────────────────────────────────────────────────────────────────────
 
+def apply_roi(frame_bgr: np.ndarray) -> np.ndarray:
+    h, w = frame_bgr.shape[:2]
+    x0, y0 = int(ROI[0]*w), int(ROI[1]*h)
+    x1, y1 = int(ROI[2]*w), int(ROI[3]*h)
+    return frame_bgr[y0:y1, x0:x1]
+
+
+def _largest_blob(mask: np.ndarray) -> int:
+    """Return the area of the single largest contiguous blob in the mask."""
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0
+    return int(max(cv2.contourArea(c) for c in contours))
+
+
 def get_pixel_counts(frame_bgr: np.ndarray) -> dict[str, int]:
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    """Returns the largest-blob area per color (not total pixels) — matches sort_controller logic."""
+    roi = apply_roi(frame_bgr)
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     return {
-        color: int(np.count_nonzero(cv2.inRange(hsv, cfg["lower"], cfg["upper"])))
+        color: _largest_blob(cv2.inRange(hsv, cfg["lower"], cfg["upper"]))
         for color, cfg in COLOR_HSV.items()
     }
 
@@ -121,7 +150,8 @@ def draw_contours(frame_bgr: np.ndarray) -> np.ndarray:
     for color, cfg in COLOR_HSV.items():
         mask       = cv2.inRange(hsv, cfg["lower"], cfg["upper"])
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if int(np.count_nonzero(mask)) >= MIN_BLOB_PIXELS:
+        thresh = MIN_BLOB_PIXELS[color] if isinstance(MIN_BLOB_PIXELS, dict) else MIN_BLOB_PIXELS
+        if contours and int(max(cv2.contourArea(c) for c in contours)) >= thresh:
             cv2.drawContours(out, contours, -1, OVERLAY_COLORS[color], 2)
     return out
 
@@ -137,12 +167,13 @@ def save_snapshots(frame_bgr: np.ndarray) -> None:
 
 
 def print_counts(counts: dict[str, int]) -> None:
-    detections = [c for c, n in counts.items() if n >= MIN_BLOB_PIXELS]
+    detections = [c for c, n in counts.items()
+                  if n >= (MIN_BLOB_PIXELS[c] if isinstance(MIN_BLOB_PIXELS, dict) else MIN_BLOB_PIXELS)]
     detected   = ("DETECTED: " + ", ".join(d.upper() for d in detections)) if detections else "nothing detected"
     print(
-        f"  GREEN:{counts['green']:6d}px  "
-        f"BLUE:{counts['blue']:6d}px  "
-        f"YELLOW:{counts['yellow']:6d}px  "
+        f"  GREEN:{counts['green']:6d}blob  "
+        f"BLUE:{counts['blue']:6d}blob  "
+        f"YELLOW:{counts['yellow']:6d}blob  "
         f"→  {detected}"
     )
 
@@ -151,9 +182,24 @@ def print_counts(counts: dict[str, int]) -> None:
 # Camera discovery
 # ─────────────────────────────────────────────────────────────────────────────
 
-def find_front_camera() -> int:
+def find_front_camera() -> str:
+    """
+    Return the device path for the front (stationary) camera.
+    Prefers the stable udev symlink /dev/video_front (keyed on USB product ID).
+    Falls back to index probing if symlink is not set up.
+    """
+    FRONT_SYM = "/dev/video_front"
+    if Path(FRONT_SYM).exists():
+        print(f"Using udev symlink: {FRONT_SYM} → {Path(FRONT_SYM).resolve()}")
+        return FRONT_SYM
+
+    print("WARNING: /dev/video_front not found — falling back to index probe.")
     found = []
-    for i in range(10):
+    for i in range(12):
+        if not Path(f"/dev/video{i}").exists():
+            continue
+        if i % 2 != 0:
+            continue
         cap = cv2.VideoCapture(i)
         if cap.isOpened():
             found.append(i)
@@ -165,7 +211,7 @@ def find_front_camera() -> int:
         sys.exit(1)
     front = found[1] if len(found) >= 2 else found[0]
     print(f"Cameras found: {found}  →  using index {front} as front camera")
-    return front
+    return str(front)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,7 +290,8 @@ def main() -> None:
             right = get_all_overlay(frame) if active == "all" else get_mask_bgr(frame, active)
 
             # Status bar
-            detections = [c for c, n in counts.items() if n >= MIN_BLOB_PIXELS]
+            detections = [c for c, n in counts.items()
+                          if n >= (MIN_BLOB_PIXELS[c] if isinstance(MIN_BLOB_PIXELS, dict) else MIN_BLOB_PIXELS)]
             status = "DETECTED: " + ", ".join(d.upper() for d in detections) if detections else "none"
             bar    = np.zeros((40, 1280, 3), dtype=np.uint8)
             cv2.putText(

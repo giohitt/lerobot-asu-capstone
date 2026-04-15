@@ -70,23 +70,38 @@ set_color_config() {
 # ── Camera detection ───────────────────────────────────────
 detect_cameras() {
   echo "Detecting cameras..."
-  INDICES=$($PYTHON -c "
-import cv2
-working = []
-for i in range(10):
+
+  # Prefer stable udev symlinks (set up by 99-sort-cameras.rules)
+  if [ -e /dev/video_handeye ] && [ -e /dev/video_front ]; then
+    CAM_HANDEYE="/dev/video_handeye"
+    CAM_FRONT="/dev/video_front"
+    echo "  Using udev symlinks: handeye=$CAM_HANDEYE, front=$CAM_FRONT"
+  else
+    echo "  WARNING: udev symlinks not found — falling back to index probe."
+    echo "  Run: sudo udevadm control --reload-rules && sudo udevadm trigger"
+    INDICES=$($PYTHON -c "
+import cv2, os
+found = []
+for i in range(12):
+    if not os.path.exists(f'/dev/video{i}'):
+        continue
+    if i % 2 != 0:
+        continue
     cap = cv2.VideoCapture(i)
     if cap.isOpened():
-        working.append(i)
+        found.append(i)
         cap.release()
-    if len(working) == 2:
+    if len(found) == 2:
         break
-print('ERROR' if len(working) < 2 else f'{working[0]} {working[1]}', end='')
+print('ERROR' if len(found) < 2 else f'{found[0]} {found[1]}', end='')
 ")
-  [ "$INDICES" = "ERROR" ] && echo "ERROR: Could not find 2 cameras. Check USB." && exit 1
-  CAM0=$(echo $INDICES | cut -d' ' -f1)
-  CAM1=$(echo $INDICES | cut -d' ' -f2)
-  echo "Detected cameras: handeye=$CAM0, front=$CAM1"
-  CAMERAS="{\"handeye\":{\"type\":\"opencv\",\"index_or_path\":$CAM0,\"width\":640,\"height\":480,\"fps\":30},\"front\":{\"type\":\"opencv\",\"index_or_path\":$CAM1,\"width\":640,\"height\":480,\"fps\":30}}"
+    [ "$INDICES" = "ERROR" ] && echo "ERROR: Could not find 2 cameras. Check USB." && exit 1
+    CAM_HANDEYE=$(echo $INDICES | cut -d' ' -f1)
+    CAM_FRONT=$(echo $INDICES | cut -d' ' -f2)
+    echo "  Detected cameras: handeye=$CAM_HANDEYE, front=$CAM_FRONT"
+  fi
+
+  CAMERAS="{\"handeye\":{\"type\":\"opencv\",\"index_or_path\":\"$CAM_HANDEYE\",\"width\":640,\"height\":480,\"fps\":30},\"front\":{\"type\":\"opencv\",\"index_or_path\":\"$CAM_FRONT\",\"width\":640,\"height\":480,\"fps\":30}}"
 }
 
 # ══════════════════════════════════════════════════════════

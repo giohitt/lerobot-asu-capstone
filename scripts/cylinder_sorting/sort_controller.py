@@ -49,21 +49,34 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
+_cam_log = logging.getLogger("lerobot.cameras.opencv.camera_opencv")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HSV color ranges — tune these with detect_colors.py before running
 # ─────────────────────────────────────────────────────────────────────────────
 COLOR_HSV = {
-    "green":  {"lower": np.array([35,  80,  50],  dtype=np.uint8),
+    "green":  {"lower": np.array([35,  60,  40],  dtype=np.uint8),
                "upper": np.array([85,  255, 255], dtype=np.uint8)},
-    "blue":   {"lower": np.array([100, 80,  50],  dtype=np.uint8),
-               "upper": np.array([130, 255, 255], dtype=np.uint8)},
-    "yellow": {"lower": np.array([20,  100, 100], dtype=np.uint8),
-               "upper": np.array([35,  255, 255], dtype=np.uint8)},
+    "blue":   {"lower": np.array([95,  50,  40],  dtype=np.uint8),
+               "upper": np.array([135, 255, 255], dtype=np.uint8)},
+    # Arm/cream is H~20-30 but S<60; shadows are V<80; pastel yellow should be S>=90, V>=90
+    "yellow": {"lower": np.array([18,  90,  90],  dtype=np.uint8),
+               "upper": np.array([38,  255, 255], dtype=np.uint8)},
 }
 
-# Minimum pixel blob to count as a real detection (not a reflection or noise)
-MIN_BLOB_PIXELS = 1500
+# Minimum area of the LARGEST single contiguous blob to count as a real cylinder.
+# Scattered background noise produces many tiny blobs; a real cylinder is one large blob.
+MIN_BLOB_PIXELS = {
+    "green":  600,
+    "blue":   600,
+    "yellow": 600,
+}
+
+# Region of Interest — only look for cylinders inside this rectangle.
+# Crops out table edges, shadows, and background clutter.
+# Format: (x_start, y_start, x_end, y_end) as fractions of frame size (0.0-1.0)
+# Default covers the centre 60% of the frame. Tune with detect_colors.py snapshots.
+ROI = (0.1, 0.1, 0.9, 0.9)  # (left, top, right, bottom)
 
 # Settling — how still the arm must be to count as "home"
 # Units match the robot's position units (degrees when use_degrees=True, else normalized)
@@ -93,22 +106,43 @@ def log_state(state: str, msg: str = "") -> None:
 # Color detection
 # ─────────────────────────────────────────────────────────────────────────────
 
+def apply_roi(frame_bgr: np.ndarray) -> np.ndarray:
+    """Crop frame to the ROI rectangle defined by fractional coordinates."""
+    h, w = frame_bgr.shape[:2]
+    x0 = int(ROI[0] * w)
+    y0 = int(ROI[1] * h)
+    x1 = int(ROI[2] * w)
+    y1 = int(ROI[3] * h)
+    return frame_bgr[y0:y1, x0:x1]
+
+
+def largest_blob(mask: np.ndarray) -> int:
+    """Return the area of the single largest contiguous blob in the mask."""
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0
+    return int(max(cv2.contourArea(c) for c in contours))
+
+
 def detect_color(frame_bgr: np.ndarray, enabled_colors: list[str]) -> str | None:
     """
-    Return the enabled color with the largest blob in the frame, or None.
-    Uses HSV thresholding — tune COLOR_HSV constants with detect_colors.py first.
+    Return the enabled color whose largest contiguous blob beats its threshold, or None.
+    Uses largest-contour area instead of total pixels — scattered background noise
+    produces many tiny blobs that don't count; a real cylinder is one large blob.
     """
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-    best_color, best_count = None, 0
+    roi_frame = apply_roi(frame_bgr)
+    hsv = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2HSV)
+    best_color, best_area = None, 0
 
     for color in enabled_colors:
         cfg = COLOR_HSV.get(color)
         if cfg is None:
             continue
-        mask  = cv2.inRange(hsv, cfg["lower"], cfg["upper"])
-        count = int(np.count_nonzero(mask))
-        if count > MIN_BLOB_PIXELS and count > best_count:
-            best_count, best_color = count, color
+        mask      = cv2.inRange(hsv, cfg["lower"], cfg["upper"])
+        area      = largest_blob(mask)
+        threshold = MIN_BLOB_PIXELS[color] if isinstance(MIN_BLOB_PIXELS, dict) else MIN_BLOB_PIXELS
+        if area > threshold and area > best_area:
+            best_area, best_color = area, color
 
     return best_color
 
@@ -164,9 +198,14 @@ def save_home_position(pos: dict) -> None:
 
 
 def get_motor_positions(robot: SO101Follower) -> dict:
-    """Read current motor positions (float values only, no camera frames)."""
-    obs = robot.get_observation()
-    return {k: float(v) for k, v in obs.items() if isinstance(v, (int, float))}
+    """Read current motor positions directly from the motor bus — no camera reads.
+
+    Uses robot.bus.sync_read() instead of robot.get_observation() so this works
+    even when cameras are disconnected (e.g. during emergency homing after a
+    camera failure).
+    """
+    raw = robot.bus.sync_read("Present_Position")
+    return {f"{k}.pos": float(v) for k, v in raw.items()}
 
 
 def smooth_home(robot: SO101Follower, home_pos: dict) -> None:
@@ -306,10 +345,13 @@ def run_sort_episode(
         print("─" * 60, flush=True)
         if home_pos is not None:
             log_state(State.SETTLING, "emergency home — bringing arm back after error...")
+            _cam_log.setLevel(logging.ERROR)  # silence dead-camera warnings during homing
             try:
                 smooth_home(robot, home_pos)
             except Exception as home_err:
                 log_state(State.ERROR, f"emergency home also failed: {home_err}")
+            finally:
+                _cam_log.setLevel(logging.WARNING)  # restore
         raise  # re-raise so the main loop can catch and handle it
 
     # ── Normal end: return to home so servos don't go limp ───────────────────
@@ -321,36 +363,45 @@ def run_sort_episode(
 # Camera discovery
 # ─────────────────────────────────────────────────────────────────────────────
 
-def find_cameras() -> tuple[int, int]:
+def find_cameras() -> tuple[str, str]:
     """
-    Return the indices of the first two capture-capable cameras.
+    Return stable device paths for handeye and front cameras.
 
-    On Jetson/V4L2 each USB camera creates two device nodes:
-      /dev/video0 (capture)  /dev/video1 (metadata-only)
-      /dev/video2 (capture)  /dev/video3 (metadata-only)
-    Probing the metadata nodes causes 'ioctl VIDIOC_QBUF: Bad file descriptor'
-    spam. We suppress stderr at the OS level during probing so that noise stays
-    out of the terminal, then restore it before returning.
+    Uses udev symlinks created by /etc/udev/rules.d/99-sort-cameras.rules:
+        /dev/video_handeye  →  icSpring 9005 (wrist-mounted camera)
+        /dev/video_front    →  icSpring 9221 (stationary front camera)
+
+    These symlinks are keyed on USB product ID so they survive port changes
+    and unplugging/replugging. If symlinks are missing, falls back to index
+    probing with a warning.
     """
     import os
 
-    # Silence V4L2 / OpenCV low-level error output during probing
+    HANDEYE_SYM = "/dev/video_handeye"
+    FRONT_SYM   = "/dev/video_front"
+
+    if os.path.exists(HANDEYE_SYM) and os.path.exists(FRONT_SYM):
+        return HANDEYE_SYM, FRONT_SYM
+
+    # Fallback — symlinks not set up yet, probe by index (even nodes only)
+    log_state(State.IDLE,
+        "WARNING: udev symlinks not found — falling back to index probe. "
+        "Run: sudo udevadm control --reload-rules && sudo udevadm trigger")
+
     devnull  = os.open(os.devnull, os.O_WRONLY)
     saved_fd = os.dup(2)
     os.dup2(devnull, 2)
     os.close(devnull)
-
     found = []
     try:
         for i in range(12):
             if not os.path.exists(f"/dev/video{i}"):
                 continue
+            if i % 2 != 0:
+                continue
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
-                # Read one frame to confirm it's a real capture node
-                ok, _ = cap.read()
-                if ok:
-                    found.append(i)
+                found.append(i)
                 cap.release()
             if len(found) == 2:
                 break
@@ -358,12 +409,15 @@ def find_cameras() -> tuple[int, int]:
         os.dup2(saved_fd, 2)
         os.close(saved_fd)
 
+    import time as _time
+    _time.sleep(1.0)
+
     if len(found) < 2:
         raise RuntimeError(
-            f"Found only {len(found)} capture-capable camera(s). Need 2 (handeye + front). "
-            "Check USB connections."
+            f"Found only {len(found)} camera(s). Need 2. Check USB connections "
+            "and udev rules (99-sort-cameras.rules)."
         )
-    return found[0], found[1]
+    return str(found[0]), str(found[1])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

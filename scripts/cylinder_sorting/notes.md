@@ -1,16 +1,11 @@
-(lerobot) jetson23@ubuntu:~/lerobot$ python scripts/cylinder_sorting/sort_controller.py --capture_home
-21:43:43 [IDLE]       device: cuda
-21:43:43 [IDLE]       enabled colors: []
-21:43:44 [IDLE]       cameras: handeye=0, front=1
-21:43:47 [IDLE]       robot connected
-21:43:47 [SETTLING]   home position saved → home_position.json
-21:43:47 [IDLE]       motor positions:
-21:43:47 [IDLE]         shoulder_pan.pos: 4.21
-21:43:47 [IDLE]         shoulder_lift.pos: -99.83
-21:43:47 [IDLE]         elbow_flex.pos: 97.04
-21:43:47 [IDLE]         wrist_flex.pos: 74.29
-21:43:47 [IDLE]         wrist_roll.pos: 1.49
-21:43:47 [IDLE]         gripper.pos: 2.48
-ioctl(VIDIOC_QBUF): Bad file descriptor
-21:43:47 [IDLE]       robot disconnected — goodbye
-(lerobot) jetson23@ubuntu:~/lerobot$ 
+amera /dev/video_front opened at 640×480.
+Mode: GUI (live window)
+MIN_BLOB_PIXELS = {'green': 1500, 'blue': 1000, 'yellow': 400}  (same as sort_controller.py)
+
+Controls: g=green  b=blue  y=yellow  a=all masks  s=snapshot  q=quit
+  GREEN:  2981px  BLUE:  1370px  YELLOW: 10372px  →  DETECTED: GREEN, BLUE, YELLOW
+  GREEN:  2903px  BLUE:  1367px  YELLOW: 10302px  →  DETECTED: GREEN, BLUE, YELLOW
+  GREEN:  2561px  BLUE:  1376px  YELLOW: 10245px  →  DETECTED: GREEN, BLUE, YELLOW
+  GREEN:  2652px  BLUE:  1372px  YELLOW: 10548px  →  DETECTED: GREEN, BLUE, YELLOW
+  GREEN:  2671px  BLUE:  1387px  YELLOW: 10246px  →  DETECTED: GREEN, BLUE, YELLOW
+  GREEN:  2735px  BLUE:  1366px  YELLOW: 10171px  →  DETECTED: GREEN, BLUE, YELLOW

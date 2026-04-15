@@ -456,7 +456,7 @@ Each requirement maps to at least one test case. Tests are run per implementatio
 | TC-ACT-001 | ACT-001 | Log loop timing for 100 steps. Compute actual Hz. | Mean ≥28Hz (within 7% of 30Hz target) | [ ] |
 | TC-ACT-002 | ACT-005 | Ctrl+C mid-episode. Confirm `robot.disconnect()` called in log. | "Robot disconnected" printed, no hanging process | PASS — confirmed clean disconnect, 0 cycles completed |
 | TC-ACT-003 | ACT-007/009 | With `home_position.json` captured, run a full sort. Watch arm trajectory after episode timer ends. | Arm moves smoothly to home over ~2-3s; no limp/drop; SETTLING log confirms arrival; "homing motion complete" printed. | [ ] |
-| TC-ACT-004 | ACT-008 | Start an episode. While arm is mid-motion, unplug a camera to trigger an error. | Log shows episode error, then "emergency home — bringing arm back after error...", then disconnect. Arm moves toward home before stopping. | [ ] |
+| TC-ACT-004 | ACT-008 | Start an episode. While arm is mid-motion, unplug a camera to trigger an error. | Log shows episode error, then "emergency home — bringing arm back after error...", then disconnect. Arm moves toward home before stopping. | PASS — arm homed successfully after camera unplug; "homing motion complete" confirmed at 21:56:53 |
 
 ---
 
@@ -491,7 +491,7 @@ Every requirement traces to at least one test case. This table closes the V-mode
 | ACT-001 | Actuation | TC-ACT-001 | NOT TESTED |
 | ACT-005 | Actuation | TC-ACT-002 | PASS |
 | ACT-007 | Actuation | TC-ACT-003 | NOT TESTED |
-| ACT-008 | Actuation | TC-ACT-004 | NOT TESTED |
+| ACT-008 | Actuation | TC-ACT-004 | PASS |
 | ACT-009 | Actuation | TC-ACT-003 | NOT TESTED |
 | TRAIN-001 | Training | TC-TRAIN-001 | COMPLETE |
 | TRAIN-002 | Training | TC-TRAIN-002 | COMPLETE |
