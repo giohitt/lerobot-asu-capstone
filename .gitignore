@@ -177,3 +177,6 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# Camera test images
+cam_*.jpg
