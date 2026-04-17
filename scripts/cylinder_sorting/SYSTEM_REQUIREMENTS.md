@@ -365,6 +365,7 @@ All data sources produce standard LeRobot v3 datasets. They can be merged, used 
 | TRAIN-002 | Initial teleoperation datasets SHALL contain ≥100 successful episodes per color recorded in LeRobot v3 format on the Jetson. | SYS-002 | TC-TRAIN-002 |
 | TRAIN-003 | The training script SHALL use `lerobot-train` with ACT policy, batch size 16, chunk size 50, and checkpoints saved every 20k steps. | SYS-002 | Inspection |
 | TRAIN-004 | Trained model checkpoints SHALL follow the naming convention `act_<color>_<version>_<source>_<steps>` (e.g., `act_green_v1_laptop_100k`). | SYS-002 | Inspection |
+| TRAIN-005 | WHEN a deployed model shows lighting sensitivity, the next dataset version SHALL include targeted demonstrations across multiple lighting conditions representative of deployment (for example ambient, room light, bright front-light, and bright all-around) before retraining or fine-tuning. | SYS-002 | TC-TRAIN-003 |
 | TRAIN-006 | The dataset transfer procedure SHALL use `rsync` over SSH with `--mkpath` to preserve LeRobot directory structure. | SYS-002 | Inspection |
 | TRAIN-007 | A training run SHALL complete within 6 hours at 100k steps on the RTX 5070 Ti. | SYS-003 | TC-TRAIN-004 |
 | TRAIN-008 | Final training loss SHALL be ≤0.05 for a model to be considered deployment-ready. | SYS-002 | TC-TRAIN-004 |
@@ -413,7 +414,7 @@ Each requirement maps to at least one test case. Tests are run per implementatio
 | TC-SYS-003 | SYS-003 | Time from cylinder placement to arm returning to neutral for 5 cycles. | Mean ≤30 seconds | PASS — cycle timing verified acceptable for the current early-end + homing behavior | [ ] |
 | TC-SYS-004 | SYS-004 | Place yellow cylinder with no yellow model loaded. Observe system behavior. | Warning logged, no episode triggered | [ ] | [ ] |
 | TC-SYS-005 | SYS-005 | Run with `--color green` CLI flag. Run with GPIO key `1`. | Both trigger a single green episode | N/A | [ ] |
-| TC-SYS-006 | SYS-006 | Ctrl+C during an active episode. Observe robot state. | Robot disconnects cleanly, no motor runaway | [ ] | [ ] |
+| TC-SYS-006 | SYS-006 | Ctrl+C during an active episode. Observe robot state. | Robot disconnects cleanly, no motor runaway | PASS — operator confirmed Ctrl+C during an active episode disconnects the robot cleanly with no motor runaway | [ ] |
 
 ### 9.2 Perception Tests
 
@@ -430,6 +431,7 @@ Each requirement maps to at least one test case. Tests are run per implementatio
 |----|-----------|-----------|---------------|--------|
 | TC-TRAIN-001 | TRAIN-001 | Run `conda activate lerobot && python -c "import torch; print(torch.version.cuda, torch.cuda.get_device_name(0))"` on laptop. | CUDA 12.8 shown, RTX 5070 Ti listed | COMPLETE |
 | TC-TRAIN-002 | TRAIN-002 | Check dataset info.json for each color: `total_episodes` field. | ≥100 for green and blue | COMPLETE |
+| TC-TRAIN-003 | TRAIN-005 | Review the current retraining plan / dataset version notes for the lighting-sensitive color. Confirm the next dataset version is intentionally being collected across multiple room-lighting conditions rather than a single fixed setup. | A multi-lighting collection plan is defined and adopted for the next dataset version | COMPLETE — multi-lighting `v2` collection strategy adopted for current recording work (ambient, room light, bright front-light, bright all-around) |
 | TC-TRAIN-004 | TRAIN-007/008 | Review training log for final loss and wall-clock time. | Loss ≤0.05, completed within 6 hours | COMPLETE (green: 0.04, blue: 0.047) |
 
 ### 9.5 Decision & Actuation Tests
@@ -439,7 +441,6 @@ Each requirement maps to at least one test case. Tests are run per implementatio
 | TC-DEC-001 | DEC-001 | Start controller with both green and blue models. Confirm the log prints `all policies loaded and in GPU memory` before DETECTING begins. Optionally monitor Jetson with `tegrastats --interval 1000` during runtime instead of `nvidia-smi`, whose per-process GPU view is unsupported on Orin. | Startup log confirms both policies loaded before episode 1; controller reaches DETECTING without lazy per-episode loading | PASS — startup log confirmed both models loaded before DETECTING; `tegrastats` used as the Jetson-native monitor |
 | TC-DEC-002 | DEC-003/007 | While in autonomous detect loop, press GPIO key `2` (blue). Observe which policy runs. | Blue policy runs for one episode regardless of camera detection | N/A (Phase 3) |
 | TC-DEC-003 | DEC-004 | Run controller with no cylinder present. Observe for 60 seconds. | No episode triggered, system loops in DETECTING state | [ ] |
-| TC-DEC-004 | DEC-004 | Run controller with no cylinder present. Observe for 60 seconds. | No episode triggered, system loops in DETECTING state | [ ] |
 | TC-DEC-005 | DEC-006/007/008 | Run one full sort cycle. Watch terminal for SETTLING state output. Then block arm from returning (hold it). | Settling logs joint deltas each interval; logs ERROR and disconnects cleanly after 8s timeout | PASS — blocking the arm during return produced SETTLING logs, 8s timeout, ERROR, and clean disconnect |
 | TC-DEC-006 | DEC-010/011/012 | (a) Run `sort_controller.py --capture_home` with arm at neutral — confirm JSON written and joints printed. (b) Start controller — confirm "loaded home position" at startup. (c) Delete JSON — confirm warning printed. | (a) `home_position.json` written with all motor keys. (b) Load message in log. (c) Warning + passive settle fallback. | PASS — capture, startup load, and missing-home warning behaviors all verified |
 | TC-ACT-001 | ACT-001 | Run a normal episode and compute effective loop rate from the final `episode done — N steps in Ts` log line. | Mean ≥15Hz on Jetson during RUNNING | PASS — observed 500 steps in 30.2s (~16.6Hz) and 469 steps in 30.0s (~15.6Hz) |
@@ -456,11 +457,11 @@ Every requirement traces to at least one test case. This table closes the V-mode
 | Requirement | Subsystem | Test Case(s) | Status |
 |-------------|-----------|-------------|--------|
 | SYS-001 | System | TC-SYS-001, TC-PERC-002 | NOT TESTED |
-| SYS-002 | System | TC-SYS-002, TC-DEC-004 | PASS |
+| SYS-002 | System | TC-SYS-002 | PASS |
 | SYS-003 | System | TC-SYS-003, TC-ACT-001 | PASS |
 | SYS-004 | System | TC-SYS-004, TC-PERC-003 | NOT TESTED |
 | SYS-005 | System | TC-SYS-005, TC-DEC-002 | NOT TESTED |
-| SYS-006 | System | TC-SYS-006, TC-ACT-002 | NOT TESTED |
+| SYS-006 | System | TC-SYS-006, TC-ACT-002 | PASS |
 | PERC-001 | Perception | TC-PERC-001 | PASS |
 | PERC-002 | Perception | TC-PERC-002 | PASS |
 | PERC-003 | Perception | TC-PERC-002 | PASS |
@@ -483,6 +484,7 @@ Every requirement traces to at least one test case. This table closes the V-mode
 | ACT-009 | Actuation | TC-ACT-003 | PASS |
 | TRAIN-001 | Training | TC-TRAIN-001 | COMPLETE |
 | TRAIN-002 | Training | TC-TRAIN-002 | COMPLETE |
+| TRAIN-005 | Training | TC-TRAIN-003 | COMPLETE |
 | TRAIN-007 | Training | TC-TRAIN-004 | COMPLETE |
 | TRAIN-008 | Training | TC-TRAIN-004 | COMPLETE |
 

@@ -44,6 +44,75 @@ episode_count()  {
     echo "0"
   fi
 }
+repo_episode_count() {
+  local repo="$1"
+  local info="$HOME/.cache/huggingface/lerobot/local/$(echo "$repo" | sed 's|local/||')/meta/info.json"
+  if [ -f "$info" ]; then
+    python3 -c "import json; d=json.load(open('$info')); print(d.get('total_episodes', d.get('num_episodes', 0)))" 2>/dev/null || echo "0"
+  else
+    echo "0"
+  fi
+}
+dataset_is_resumeable() {
+  # $1=repo_id
+  # LeRobot v3 resume needs the dataset metadata parquet structure to exist.
+  # A partially created dataset dir (e.g. only info.json/stats.json) will cause
+  # lerobot_record to fail locally, then fall through to a Hugging Face Hub lookup.
+  local repo="$1"
+  local base="$HOME/.cache/huggingface/lerobot/local/$(echo "$repo" | sed 's|local/||')"
+  [ -f "$base/meta/info.json" ] || return 1
+  [ -f "$base/meta/stats.json" ] || return 1
+  [ -d "$base/meta/episodes" ] || return 1
+  return 0
+}
+resolve_record_target() {
+  # $1=repo_id
+  local repo="$1"
+  local existing_dir="$HOME/.cache/huggingface/lerobot/local/$(echo "$repo" | sed 's|local/||')"
+  RECORD_RESUME=""
+  if [ -d "$existing_dir" ]; then
+    if ! dataset_is_resumeable "$repo"; then
+      echo ""
+      echo "This dataset directory exists but is incomplete/corrupted."
+      echo "LeRobot cannot resume it safely."
+      echo "  1) Delete it and start over"
+      echo "  2) Cancel"
+      echo ""
+      ask "Choice" "1"
+      if [[ "$REPLY" =~ ^[2] ]]; then
+        echo "Cancelled."
+        exit 0
+      fi
+      sudo rm -rf "$existing_dir"
+      if [ -d "$existing_dir" ]; then
+        echo "ERROR: Could not delete $existing_dir"
+        echo "Try manually: sudo rm -rf \"$existing_dir\""
+        exit 1
+      fi
+      echo "Broken dataset deleted."
+      return 0
+    fi
+
+    local n=$(repo_episode_count "$repo")
+    echo ""
+    echo "This dataset already exists with $n episodes."
+    echo "  1) Add more episodes to it"
+    echo "  2) Delete it and start over"
+    echo ""
+    ask "Choice" "1"
+    if [[ "$REPLY" =~ ^[2] ]]; then
+      sudo rm -rf "$existing_dir"
+      if [ -d "$existing_dir" ]; then
+        echo "ERROR: Could not delete $existing_dir"
+        echo "Try manually: sudo rm -rf \"$existing_dir\""
+        exit 1
+      fi
+      echo "Old data deleted."
+    else
+      RECORD_RESUME="--resume=true"
+    fi
+  fi
+}
 
 # ── Color config ───────────────────────────────────────────
 set_color_config() {
@@ -268,23 +337,8 @@ interactive_record() {
   echo "Example custom name: cylinder_sorting_green_demo"
   ask "Dataset name" "$default_name"
   repo="local/$REPLY"
-
-  # Check if this dataset already exists
-  local existing_dir="$HOME/.cache/huggingface/lerobot/local/$REPLY"
-  if [ -d "$existing_dir" ]; then
-    local n=$(ls "$existing_dir/episodes" 2>/dev/null | wc -l | tr -d ' ')
-    echo ""
-    echo "This dataset already exists with $n episodes."
-    echo "  1) Add more episodes to it"
-    echo "  2) Delete it and start over"
-    echo ""
-    ask "Choice" "1"
-    if [[ "$REPLY" =~ ^[2] ]]; then
-      sudo rm -rf "$existing_dir"; echo "Old data deleted."
-    else
-      resume="--resume=true"
-    fi
-  fi
+  resolve_record_target "$repo"
+  resume="$RECORD_RESUME"
 
   echo ""
   ask "How many episodes do you want to record this session?" "10"
@@ -381,16 +435,18 @@ interactive_train() {
 interactive_eval() {
   top; row "TEST MODEL — $COLOR"; divider
 
-  # List all model directories matching the color
+  # List model directories matching both color and the requested version/name token.
+  # This keeps eval aligned with whatever the user typed at the version prompt
+  # (e.g. v1, v2, laptop_100k, chickenversion).
   local train_dir="$LEROBOT_DIR/outputs/train"
   local models=()
   while IFS= read -r d; do
-    [[ "$d" == *"$COLOR"* ]] && models+=("$d")
+    [[ "$d" == *"$COLOR"* && "$d" == *"$VERSION"* ]] && models+=("$d")
   done < <(ls "$train_dir" 2>/dev/null | sort)
 
   if [ ${#models[@]} -eq 0 ]; then
-    row "No trained model found for $COLOR."
-    row "Please run 'train' first, then come back."
+    row "No trained model found for $COLOR matching '$VERSION'."
+    row "Check the model name or run 'train' first."
     bot; exit 1
   fi
 
@@ -568,8 +624,10 @@ set_color_config "$COLOR"
 case "$CMD" in
   record)
     if [[ "$ARG3" =~ ^[0-9]+$ ]]; then
-      # Direct: auto-detect append vs fresh
-      RESUME=""; dataset_exists && RESUME="--resume=true"
+      # Direct: if dataset already exists, still ask append vs delete so behavior
+      # matches interactive mode and avoids confusing overwrite errors.
+      resolve_record_target "$DATASET"
+      RESUME="$RECORD_RESUME"
       _run_record "$ARG3" "$DATASET" "$RESUME"
     else
       interactive_record
