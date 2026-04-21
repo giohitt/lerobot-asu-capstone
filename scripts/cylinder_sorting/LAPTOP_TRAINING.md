@@ -212,13 +212,28 @@ The Jetson eval script always looks at `checkpoints/last/pretrained_model/` — 
 
 ---
 
-## 5. Eval on the Jetson
+## 5. Deploy on the Jetson
+
+### Quick eval (single model, recorded output)
 
 Back on the Jetson:
 
 ```bash
 bash /home/jetson23/lerobot/scripts/cylinder_sorting/sort.sh green eval
 ```
+
+### Continuous autonomous loop (production demo)
+
+Use `sort_controller.py` to run both models simultaneously in a continuous color-detection loop — no recording overhead, direct policy inference:
+
+```bash
+cd /home/jetson23/lerobot
+python scripts/cylinder_sorting/sort_controller.py \
+    --model_green outputs/train/act_green_v1_laptop_100k/checkpoints/last/pretrained_model \
+    --model_blue  outputs/train/act_blue_v1_laptop_100k/checkpoints/last/pretrained_model
+```
+
+The robot will detect which color cylinder is present, run the correct model, sort it, return to home, and repeat — indefinitely until Ctrl+C. See `CYLINDER_SORTING_GUIDE.md` section 5 for full usage and how to capture a home position before running.
 
 ---
 

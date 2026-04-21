@@ -78,7 +78,7 @@ The system starts with human teleoperation to collect data (Phase 1), uses that 
 |-------|-------|-------------|-------------|
 | **1** | Data Collection & Training | Teleoperate arm 100× per color, train ACT policy on laptop GPU, transfer model to Jetson | Trained models: `act_green_v1_laptop_100k`, `act_blue_v1_laptop_100k` |
 | **2** | Autonomous Sort Controller | Color detection via HSV, direct policy inference loop, CLI control, optional recording | Robot sorts cylinders continuously without human input |
-| **3** | GPIO Keypad Integration | Physical keypad triggers color selection or system commands (pause, stop, force color) | Operator control without a computer |
+| **3** | GPIO Keypad Integration | Physical keypad triggers color selection or system commands (pause, stop, force color) | **NOT IMPLEMENTED** — CLI `--color` flag used as fallback operator control |
 
 ### 1.3 Hardware & Software
 
@@ -177,7 +177,7 @@ The system follows the **Perception–Decision–Actuation** pattern. Perception
 | SYS-002 | The system SHALL execute the correct trained ACT policy for the detected cylinder color. | Core mission capability | TC-SYS-002 |
 | SYS-003 | The system SHALL complete one pick-and-place sort cycle in ≤30 seconds. | Operational efficiency | TC-SYS-003 |
 | SYS-004 | WHEN no model is loaded for a detected color, the system SHALL skip that cylinder and log a warning rather than attempt a sort. | Safety — no undefined behavior | TC-SYS-004 |
-| SYS-005 | The system SHALL accept operator color selection and system commands via both CLI arguments and GPIO keypad input. | Dual-mode operator interface | TC-SYS-005 |
+| SYS-005 | The system SHALL accept operator color selection and system commands via CLI arguments. GPIO keypad input was specified (Phase 3) but not implemented — see Phase 3 section for documented blockers. | Operator interface | TC-SYS-005 |
 | SYS-006 | WHEN an exception or emergency stop is triggered, the system SHALL disconnect the robot safely within 1 second and halt all motion. | Safety requirement | TC-SYS-006 |
 
 ---
@@ -270,7 +270,7 @@ IDLE ──[start command]──▶ DETECTING ──[color found]──▶ RUNNI
 | DEC-006 | WHEN an episode ends, the system SHALL enter SETTLING state and poll motor positions every 500ms until all joint deltas are less than 1.0° between consecutive readings. | SYS-006 | TC-DEC-005 |
 | DEC-007 | WHEN the arm has not settled within 8 seconds of episode end, the system SHALL transition to ERROR state, disconnect the robot, and exit rather than start a new episode from an unknown arm position. | SYS-006 | TC-DEC-005 |
 | DEC-008 | A new detection cycle SHALL NOT begin until SETTLING has returned success. | SYS-006 | TC-DEC-005 |
-| DEC-009 | The CLI and GPIO interfaces SHALL be simultaneously active; neither blocks the other. | SYS-005 | TC-DEC-002 |
+| DEC-009 | The CLI and GPIO interfaces SHALL be simultaneously active; neither blocks the other. *(GPIO portion not implemented — CLI-only at Phase 2 close.)* | SYS-005 | TC-DEC-002 |
 | DEC-010 | WHEN `home_position.json` exists, the system SHALL load it at startup and use those motor positions as the target return pose for all HOMING transitions. | SYS-006 | TC-DEC-006 |
 | DEC-011 | WHEN no `home_position.json` exists, the system SHALL log a warning at startup and rely on the policy's trained return behavior; the passive settle check SHALL still apply. | SYS-006 | TC-DEC-006 |
 | DEC-012 | The `--capture_home` CLI flag SHALL connect the robot, read current motor positions, save them to `home_position.json`, print each joint value, and exit — no sort episode is triggered. | SYS-005 | TC-DEC-006 |
@@ -460,7 +460,7 @@ Every requirement traces to at least one test case. This table closes the V-mode
 | SYS-002 | System | TC-SYS-002 | PASS |
 | SYS-003 | System | TC-SYS-003, TC-ACT-001 | PASS |
 | SYS-004 | System | TC-SYS-004, TC-PERC-003 | NOT TESTED |
-| SYS-005 | System | TC-SYS-005, TC-DEC-002 | NOT TESTED |
+| SYS-005 | System | TC-SYS-005, TC-DEC-002 | NOT IMPLEMENTED (GPIO) / CLI PASS |
 | SYS-006 | System | TC-SYS-006, TC-ACT-002 | PASS |
 | PERC-001 | Perception | TC-PERC-001 | PASS |
 | PERC-002 | Perception | TC-PERC-002 | PASS |
@@ -577,9 +577,19 @@ precise_sleep(1/fps - dt)
 | **Approach** | Background thread reads GPIO pins, writes to shared state dict checked by the sort loop |
 | **Keymap** | Key 1 = green, 2 = blue, 3 = yellow, 4 = pause, 5 = resume, 6 = safe stop |
 | **Interface** | GPIO and CLI simultaneously active; GPIO overrides detection for one episode only |
-| **Status** | Planned |
+| **Status** | **NOT IMPLEMENTED** |
 
-### 12.2 Keymap
+### 12.2 Why GPIO Was Not Implemented
+
+Phase 3 GPIO keypad integration was designed and specified but not implemented due to time constraints on the project timeline. The following blockers were encountered:
+
+| Blocker | Detail |
+|---|---|
+| **Jetson GPIO library compatibility** | The `Jetson.GPIO` Python library requires specific pin mapping for the Orin AGX that differs from earlier Jetson models; the correct `BOARD` vs `BCM` mapping was not confirmed before timeline ended |
+| **Hardware not available** | A physical keypad/button board was not assembled in time |
+| **Operator control via CLI sufficient for demo** | The `--color` flag and continuous detection loop in `sort_controller.py` provided adequate operator control for the capstone demonstration without physical hardware |
+
+### 12.3 Intended Keymap (Not Implemented)
 
 | Key | Function | Scope |
 |-----|----------|-------|
@@ -590,9 +600,25 @@ precise_sleep(1/fps - dt)
 | `5` | Resume autonomous loop | Immediate |
 | `6` | Safe stop — disconnect robot and exit | Session |
 
-### 12.3 Implementation Approach
+### 12.4 Intended Implementation Approach (Not Implemented)
 
-`gpio_keypad.py` runs as a daemon thread reading GPIO pins via `RPi.GPIO` or Jetson GPIO library. It writes to a shared `keypad_state` dict. The sort loop checks `keypad_state["override_color"]` each detection cycle before running HSV masking.
+`gpio_keypad.py` was to run as a daemon thread reading GPIO pins via the Jetson GPIO library. It would write to a shared `keypad_state` dict. The sort loop checks `keypad_state["override_color"]` each detection cycle before running HSV masking.
+
+The architecture in `sort_controller.py` already supports this — the `--color` CLI flag uses the same override pathway that GPIO would use. Adding GPIO would be a matter of implementing the `gpio_keypad.py` thread and wiring it to the existing state dict.
+
+### 12.5 Current Operator Control (Implemented)
+
+Without GPIO, operators control the system via CLI:
+
+```bash
+# Autonomous loop — sorts whatever color it detects
+python sort_controller.py --model_green <path> --model_blue <path>
+
+# Force a single green episode then exit
+python sort_controller.py --model_green <path> --color green
+
+# Ctrl+C at any time — arm returns to home cleanly before exit
+```
 
 ---
 
@@ -606,3 +632,4 @@ precise_sleep(1/fps - dt)
 | 1.0 | 2026-04-12 | Team + AI Agent | Full rewrite to match P-D-A template structure, add test cases, traceability matrix |
 | 1.1 | 2026-04-12 | Team + AI Agent | Added HOMING state, DEC-010/011/012, ACT-007/008/009, TC-DEC-006, TC-ACT-003/004 — smooth arm return and emergency homing after episode end or mid-episode error; `--capture_home` CLI command and `home_position.json` storage |
 | 1.2 | 2026-04-15 | Team + AI Agent | Updated ACT-001 / TC-ACT-001 to match measured sustainable Jetson loop rate (≥15Hz) and marked the actuation timing test passed based on observed runtime logs |
+| 1.3 | 2026-04-15 | Team + AI Agent | Phase 3 GPIO marked NOT IMPLEMENTED — documented blockers, preserved intended design, added current CLI-based operator control as the implemented alternative |
