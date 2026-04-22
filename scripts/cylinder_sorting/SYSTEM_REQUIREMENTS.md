@@ -409,7 +409,7 @@ Each requirement maps to at least one test case. Tests are run per implementatio
 | TC-SYS-002 | SYS-002 | Place green cylinder. Run full sort. Observe bin. Repeat 10×. Then repeat for blue. | ≥8/10 correct bin placements per color | PASS — green and blue sorting behavior verified |
 | TC-SYS-003 | SYS-003 | Time from cylinder placement to arm returning to neutral for 5 cycles. | Mean ≤30 seconds | PASS — cycle timing verified acceptable |
 | TC-SYS-004 | SYS-004 | Place yellow cylinder with no yellow model loaded. Observe system behavior. | Warning logged, no episode triggered | PASS — system loops in DETECTING; yellow ignored, no episode triggered |
-| TC-SYS-005 | SYS-005 | (a) Run with `--color green` CLI flag — confirm single green episode. (b) Write `sort_config.json` with `enabled_colors: ["green"]` — confirm blue ignored at detection. | Both control paths select correct behavior | (a) PASS — CLI flag verified; (b) see TC-IF-002 |
+| TC-SYS-005 | SYS-005 | (a) Run with `--color green` CLI flag — confirm single green episode. (b) Write `sort_config.json` with `enabled_colors: ["green"]` — confirm blue ignored at detection. | Both control paths select correct behavior | PASS — (a) CLI flag verified; (b) `sort_config.json` / `enabled_colors` behavior verified per TC-IF-002 |
 | TC-SYS-006 | SYS-006 | Ctrl+C during an active episode. Observe robot state. | Robot disconnects cleanly, no motor runaway | PASS — confirmed clean disconnect, no motor runaway |
 
 ### 9.2 Perception Tests
@@ -434,8 +434,8 @@ Each requirement maps to at least one test case. Tests are run per implementatio
 
 | ID | Traces To | Procedure | Pass Criteria | Status |
 |----|-----------|-----------|---------------|--------|
-| TC-IF-001 | IF-007 | With `sort_controller.py` running in autonomous loop, edit `sort_config.json` on disk (change `enabled_colors`). Observe terminal without restarting the process. | Controller logs config reload and updates active color set within one detect cycle (≤0.3s after file write) | [ ] |
-| TC-IF-002 | IF-008 | Write `sort_config.json` with `enabled_colors: ["green"]` only. Place a blue cylinder in the detection zone. Observe behavior. Then add `"blue"` to `enabled_colors`. Place blue cylinder again. | Blue cylinder ignored when absent from `enabled_colors`; correctly triggers episode after re-enabling | [ ] |
+| TC-IF-001 | IF-007 | With `sort_controller.py` running in autonomous loop, edit `sort_config.json` on disk (change `enabled_colors`). Observe terminal without restarting the process. | Controller logs config reload and updates active color set within one detect cycle (≤0.3s after file write) | PASS — hot-reload on `sort_config.json` mtime change observed; optional path: ATOMS-driven write via `atoms_read_poll` + Supabase GET |
+| TC-IF-002 | IF-008 | Write `sort_config.json` with `enabled_colors: ["green"]` only. Place a blue cylinder in the detection zone. Observe behavior. Then add `"blue"` to `enabled_colors`. Place blue cylinder again. | Blue cylinder ignored when absent from `enabled_colors`; correctly triggers episode after re-enabling | PASS — `enabled_colors` correctly gates detection; blue episode only when blue is enabled |
 
 ### 9.5 Decision & Actuation Tests
 
@@ -462,7 +462,7 @@ Every requirement traces to at least one test case. This table closes the V-mode
 | SYS-002 | System | TC-SYS-002 | PASS |
 | SYS-003 | System | TC-SYS-003, TC-ACT-001 | PASS |
 | SYS-004 | System | TC-SYS-004, TC-PERC-003 | PASS |
-| SYS-005 | System | TC-SYS-005 | PARTIAL — CLI PASS; config path pending TC-IF-002 |
+| SYS-005 | System | TC-SYS-005, TC-IF-001, TC-IF-002 | PASS |
 | SYS-006 | System | TC-SYS-006, TC-ACT-002 | PASS |
 | PERC-001 | Perception | TC-PERC-001 | PASS |
 | PERC-002 | Perception | TC-PERC-002 | PASS |
@@ -488,8 +488,8 @@ Every requirement traces to at least one test case. This table closes the V-mode
 | TRAIN-005 | Training | TC-TRAIN-003 | COMPLETE |
 | TRAIN-007 | Training | TC-TRAIN-004 | COMPLETE |
 | TRAIN-008 | Training | TC-TRAIN-004 | COMPLETE |
-| IF-007 | Interface | TC-IF-001 | NOT TESTED |
-| IF-008 | Interface | TC-IF-002 | NOT TESTED |
+| IF-007 | Interface | TC-IF-001 | PASS |
+| IF-008 | Interface | TC-IF-002 | PASS |
 
 ---
 
@@ -585,3 +585,4 @@ precise_sleep(1/fps - dt)
 | 1.2 | 2026-04-15 | Team + AI Agent | Updated ACT-001 / TC-ACT-001 to match measured sustainable Jetson loop rate (≥15Hz) and marked the actuation timing test passed based on observed runtime logs |
 | 1.3 | 2026-04-15 | Team + AI Agent | Phase 3 GPIO marked NOT IMPLEMENTED — documented blockers, preserved intended design, added current CLI-based operator control as the implemented alternative |
 | 1.4 | 2026-04-21 | Team + AI Agent | Removed all GPIO content — Phase 3 section, DEC-003, DEC-009, IF-003, TC-DEC-002, Phase 3 test columns. Added IF-007/IF-008 (ATOMS sort_config.json bridge), TC-IF-001/TC-IF-002, §9.4 Interface Tests. Marked DEC-004 PASS. Updated SYS-001 to PARTIAL and SYS-005 to reflect CLI + config control paths. |
+| 1.5 | 2026-04-22 | Team + AI Agent | TC-IF-001 and TC-IF-002 marked PASS in §9.4; SYS-005, IF-007, and IF-008 marked PASS in §10 (interface verification and `sort_config.json` / `enabled_colors` complete). |
