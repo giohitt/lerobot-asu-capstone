@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to sort_config.json and edit paths. This starter enables ONLY green so behavior differs from a usual green+blue ATOMS intent until your bridge overwrites the file. Extra keys like _comment are ignored by sort_controller.py.",
+  "enabled_colors": ["green"],
+  "models": {
+    "green": "outputs/train/act_green_v2/checkpoints/last/pretrained_model",
+    "blue": "outputs/train/act_blue_v1_laptop_100k/checkpoints/last/pretrained_model"
+  }
+}

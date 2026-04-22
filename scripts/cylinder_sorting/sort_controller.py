@@ -23,7 +23,7 @@ Usage:
         --model_green  ~/lerobot/outputs/train/act_green_v1_laptop_100k/checkpoints/last/pretrained_model \
         --color green
 
-sort_config.json format (written by ATOMS MCP bridge):
+sort_config.json format (written by ATOMS MCP bridge; copy from sort_config.example.json to start):
     {
       "enabled_colors": ["green", "blue"],
       "models": {
@@ -35,6 +35,11 @@ sort_config.json format (written by ATOMS MCP bridge):
     The controller hot-reloads this file every detection cycle. When ATOMS updates
     the requirements and regenerates sort_config.json, the robot picks up the change
     on the next detect pass — no restart required.
+
+Optional read-only ATOMS REST poll (same .env as supabase_atoms_rest — use service key on Jetson):
+    ATOMS_REST_POLL=1          GET items each DETECTING pass; logs http, JSON body, vision_color
+    ATOMS_READ_TITLE_PREFIX   substring for title ilike filter (default IF-008)
+    ATOMS_REST_LOG_MAX_CHARS  truncate logged JSON (default 12000)
 """
 
 import argparse
@@ -66,6 +71,12 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 _cam_log = logging.getLogger("lerobot.cameras.opencv.camera_opencv")
+
+try:
+    from atoms_read_poll import log_atoms_rest_detect_cycle as _atoms_rest_log_cycle
+except ImportError:
+    def _atoms_rest_log_cycle(*_a, **_k):
+        return
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HSV color ranges — tune these with detect_colors.py before running
@@ -726,11 +737,17 @@ def main() -> None:
                 front_frame  = obs.get("front")
 
                 if front_frame is None:
+                    _atoms_rest_log_cycle(
+                        log_state, state=State.DETECTING, vision_color=None
+                    )
                     log_state(State.DETECTING, "no frame from front camera — check USB")
                     time.sleep(args.detect_pause)
                     continue
 
                 detected = detect_color(front_frame, enabled_colors)
+                _atoms_rest_log_cycle(
+                    log_state, state=State.DETECTING, vision_color=detected
+                )
 
                 if not detected:
                     now = time.perf_counter()

@@ -182,3 +182,8 @@ outputs/
 # Camera test images
 cam_*.jpg
 notes.md
+
+### Cylinder sorting — local Supabase OpenAPI dump (do not commit keys or schema exports)
+scripts/cylinder_sorting/openapi.supabase.json
+# Local sort config (copy from sort_config.example.json); may hold machine-specific paths
+scripts/cylinder_sorting/sort_config.json
