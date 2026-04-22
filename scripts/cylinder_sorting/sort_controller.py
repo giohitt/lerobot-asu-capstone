@@ -10,7 +10,10 @@ State machine:
                         ERROR → EXIT
 
 Usage:
-    # Autonomous loop — sorts any detected color indefinitely
+    # Autonomous loop driven by sort_config.json (ATOMS MCP updates this file)
+    python sort_controller.py
+
+    # Autonomous loop — sorts any detected color indefinitely (CLI fallback)
     python sort_controller.py \
         --model_green  ~/lerobot/outputs/train/act_green_v1_laptop_100k/checkpoints/last/pretrained_model \
         --model_blue   ~/lerobot/outputs/train/act_blue_v1_laptop_100k/checkpoints/last/pretrained_model
@@ -19,6 +22,19 @@ Usage:
     python sort_controller.py \
         --model_green  ~/lerobot/outputs/train/act_green_v1_laptop_100k/checkpoints/last/pretrained_model \
         --color green
+
+sort_config.json format (written by ATOMS MCP bridge):
+    {
+      "enabled_colors": ["green", "blue"],
+      "models": {
+        "green": "outputs/train/act_green_v1_laptop_100k/checkpoints/last/pretrained_model",
+        "blue":  "outputs/train/act_blue_v1_laptop_100k/checkpoints/last/pretrained_model"
+      }
+    }
+
+    The controller hot-reloads this file every detection cycle. When ATOMS updates
+    the requirements and regenerates sort_config.json, the robot picks up the change
+    on the next detect pass — no restart required.
 """
 
 import argparse
@@ -185,7 +201,8 @@ def load_policy(checkpoint_path: str | Path, device: torch.device):
 # HOME POSITION — saved neutral pose used to return arm after each episode
 # ─────────────────────────────────────────────────────────────────────────────
 
-HOME_POS_FILE = Path(__file__).parent / "home_position.json"
+HOME_POS_FILE  = Path(__file__).parent / "home_position.json"
+CONFIG_FILE    = Path(__file__).parent / "sort_config.json"
 
 # Homing motion parameters
 HOME_PIVOT_STEPS = 30  # ~1.0s pivot-clear phase before descending home
@@ -196,6 +213,35 @@ HOME_PIVOT_JOINTS = (
     "shoulder_pan.pos",
     "wrist_roll.pos",
 )
+
+
+def read_sort_config() -> dict[str, str] | None:
+    """
+    Parse sort_config.json and return {color: model_path} for enabled colors.
+
+    Returns None if the file does not exist or cannot be parsed.
+    The file is written by the ATOMS MCP bridge script whenever a sorting
+    requirement changes in ATOMS.
+    """
+    if not CONFIG_FILE.exists():
+        return None
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text())
+        models   = cfg.get("models", {})
+        enabled  = cfg.get("enabled_colors", list(models.keys()))
+        result   = {c: str(Path(p).expanduser()) for c, p in models.items() if c in enabled}
+        return result or None
+    except Exception as e:
+        log_state(State.IDLE, f"WARNING: could not read sort_config.json: {e}")
+        return None
+
+
+def config_mtime() -> float:
+    """Return the last-modified timestamp of sort_config.json, or 0 if missing."""
+    try:
+        return CONFIG_FILE.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
 
 
 def load_home_position() -> dict | None:
@@ -539,26 +585,36 @@ def main() -> None:
     args = parser.parse_args()
 
     # ── Build model map ───────────────────────────────────────────────────────
-    model_paths: dict[str, str] = {}
-    if args.model_green:  model_paths["green"]  = args.model_green
-    if args.model_blue:   model_paths["blue"]   = args.model_blue
-    if args.model_yellow: model_paths["yellow"] = args.model_yellow
+    # Priority: sort_config.json > CLI flags
+    # sort_config.json is written by the ATOMS MCP bridge and hot-reloaded
+    # each detection cycle. CLI flags are the fallback for manual runs.
+    cfg_paths = read_sort_config()
+    if cfg_paths:
+        log_state(State.IDLE, f"using sort_config.json: {list(cfg_paths.keys())}")
+        model_paths: dict[str, str] = cfg_paths
+    else:
+        model_paths = {}
+        if args.model_green:  model_paths["green"]  = args.model_green
+        if args.model_blue:   model_paths["blue"]   = args.model_blue
+        if args.model_yellow: model_paths["yellow"] = args.model_yellow
 
     if not args.capture_home:
         if not model_paths:
             parser.error(
-                "Provide at least one model path.\n"
-                "  --model_green  <path/to/pretrained_model>\n"
-                "  --model_blue   <path/to/pretrained_model>\n"
-                "  --model_yellow <path/to/pretrained_model>"
+                "No models found. Either:\n"
+                "  1. Create sort_config.json in this directory (written by ATOMS MCP)\n"
+                "  2. Pass CLI flags:\n"
+                "       --model_green  <path/to/pretrained_model>\n"
+                "       --model_blue   <path/to/pretrained_model>"
             )
-        # If --color is given, that color must have a model
         if args.color and args.color not in model_paths:
             parser.error(
-                f"--color {args.color} requires --model_{args.color} to be set"
+                f"--color {args.color} requires a model for that color "
+                f"(via sort_config.json or --model_{args.color})"
             )
 
     enabled_colors = list(model_paths.keys())
+    _last_config_mtime = config_mtime()  # track for hot-reload
 
     # ── Device ───────────────────────────────────────────────────────────────
     device = get_safe_torch_device("cuda" if torch.cuda.is_available() else "cpu")
@@ -637,6 +693,28 @@ def main() -> None:
     HEARTBEAT_S    = 10.0  # print "watching..." every N seconds when idle
     try:
         while True:
+
+            # ── HOT-RELOAD sort_config.json ───────────────────────────────────
+            # Check on every detection pass. If the file changed (ATOMS MCP wrote
+            # a new config), reload the model map and swap in/out policies without
+            # restarting the process.
+            if not args.color:  # skip hot-reload in single-episode mode
+                current_mtime = config_mtime()
+                if current_mtime != _last_config_mtime and current_mtime > 0:
+                    _last_config_mtime = current_mtime
+                    new_paths = read_sort_config()
+                    if new_paths:
+                        added   = [c for c in new_paths if c not in policies]
+                        removed = [c for c in list(policies.keys()) if c not in new_paths]
+                        for color in added:
+                            log_state(State.DETECTING, f"hot-reload: loading {color} policy...")
+                            policies[color] = load_policy(new_paths[color], device)
+                        for color in removed:
+                            del policies[color]
+                            log_state(State.DETECTING, f"hot-reload: removed {color} policy")
+                        enabled_colors = list(new_paths.keys())
+                        log_state(State.DETECTING,
+                            f"hot-reload complete — enabled: {enabled_colors}")
 
             # ── DETECTING ────────────────────────────────────────────────────
             if args.color:
