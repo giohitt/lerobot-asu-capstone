@@ -36,10 +36,11 @@ sort_config.json format (written by ATOMS MCP bridge; copy from sort_config.exam
     the requirements and regenerates sort_config.json, the robot picks up the change
     on the next detect pass — no restart required.
 
-Optional read-only ATOMS REST poll (same .env as supabase_atoms_rest — use service key on Jetson):
-    ATOMS_REST_POLL=1          GET items each DETECTING pass; logs http, JSON body, vision_color
-    ATOMS_READ_TITLE_PREFIX   substring for title ilike filter (default IF-008)
-    ATOMS_REST_LOG_MAX_CHARS  truncate logged JSON (default 12000)
+Optional ATOMS → sort_config.json bridge (same .env as supabase_atoms_rest):
+    ATOMS_REST_POLL=1              Enable poll + bridge during DETECTING (GET-only, throttled)
+    ATOMS_REST_POLL_INTERVAL_SEC   Minimum seconds between GETs (default 30; floor 1)
+    ATOMS_READ_TITLE_PREFIX        Substring for title ilike filter (default IF-008)
+    ATOMS_BRIDGE_MODEL_{GREEN|BLUE|YELLOW}   Local model paths used when writing sort_config.json
 """
 
 import argparse
@@ -225,6 +226,8 @@ HOME_PIVOT_JOINTS = (
     "wrist_roll.pos",
 )
 
+_home_start_t: float = 0.0
+
 
 def read_sort_config() -> dict[str, str] | None:
     """
@@ -294,7 +297,9 @@ def smooth_home(robot: SO101Follower, home_pos: dict) -> None:
     The gripper is held half-open during the motion so objects are released
     reliably before the arm sweeps home.
     """
-    log_state(State.SETTLING, "returning arm to home position...")
+    global _home_start_t
+    _home_start_t = time.perf_counter()
+    log_state(State.SETTLING, "returning home...")
     current = get_motor_positions(robot)
     release_gripper = None
     if "gripper.pos" in current:
@@ -321,7 +326,6 @@ def smooth_home(robot: SO101Follower, home_pos: dict) -> None:
     if release_gripper is not None:
         pivot_pose["gripper.pos"] = release_gripper
 
-    log_state(State.SETTLING, "opening gripper and pivoting clear before final home...")
     _send_interpolated(current, pivot_pose, HOME_PIVOT_STEPS)
 
     # Phase 2: once clear of the workspace, move the full arm down to home.
@@ -329,8 +333,6 @@ def smooth_home(robot: SO101Follower, home_pos: dict) -> None:
     if release_gripper is not None:
         final_pose["gripper.pos"] = release_gripper
     _send_interpolated(pivot_pose, final_pose, HOME_RETURN_STEPS)
-
-    log_state(State.SETTLING, "homing motion complete")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -348,10 +350,8 @@ def wait_for_settle(robot: SO101Follower, home_pos: dict | None) -> bool:
 
     Returns True if settled within SETTLE_TIMEOUT_S, False otherwise.
     """
-    log_state(State.SETTLING, "verifying arm is at rest...")
     start    = time.perf_counter()
     prev_pos = None
-    poll     = 0
 
     while time.perf_counter() - start < SETTLE_TIMEOUT_S:
         curr_pos = get_motor_positions(robot)
@@ -362,18 +362,18 @@ def wait_for_settle(robot: SO101Follower, home_pos: dict | None) -> bool:
 
         if prev_pos is not None:
             max_delta = max(abs(curr_pos[k] - prev_pos[k]) for k in curr_pos)
-            if poll % 4 == 0:
-                log_state(State.SETTLING, f"max joint delta: {max_delta:.2f}")
             if max_delta < SETTLE_THRESHOLD:
-                elapsed = time.perf_counter() - start
-                log_state(State.SETTLING, f"✓ arm settled in {elapsed:.1f}s")
+                total = time.perf_counter() - (_home_start_t or start)
+                log_state(State.SETTLING, f"✓ returned home ({total:.1f}s)")
                 return True
 
         prev_pos = curr_pos
-        poll    += 1
         time.sleep(SETTLE_INTERVAL_S)
 
-    log_state(State.ERROR, f"arm did not settle within {SETTLE_TIMEOUT_S}s — aborting")
+    log_state(
+        State.ERROR,
+        f"✗ arm did not return home within {SETTLE_TIMEOUT_S:.1f}s — stopping",
+    )
     return False
 
 
@@ -453,7 +453,7 @@ def run_sort_episode(
                         print("─" * 60, flush=True)
                         log_state(
                             State.RUNNING,
-                            f"target cleared from ROI — ending episode early at {timestamp:.1f}s"
+                            f"✓ {target_color} cylinder placed ({timestamp:.1f}s)",
                         )
                         print("─" * 60, flush=True)
                         break
@@ -472,12 +472,11 @@ def run_sort_episode(
         log_state(State.ERROR, f"episode failed at step {step} ({timestamp:.1f}s): {e}")
         print("─" * 60, flush=True)
         if home_pos is not None:
-            log_state(State.SETTLING, "emergency home — bringing arm back after error...")
             _cam_log.setLevel(logging.ERROR)  # silence dead-camera warnings during homing
             try:
                 smooth_home(robot, home_pos)
             except Exception as home_err:
-                log_state(State.ERROR, f"emergency home also failed: {home_err}")
+                log_state(State.ERROR, f"✗ home failed: {home_err}")
             finally:
                 _cam_log.setLevel(logging.WARNING)  # restore
         raise  # re-raise so the main loop can catch and handle it
@@ -787,8 +786,6 @@ def main() -> None:
             # ── SETTLING ─────────────────────────────────────────────────────
             settled = wait_for_settle(robot, home_pos)
             if not settled:
-                log_state(State.ERROR,
-                    "arm failed to settle — stopping to avoid unsafe next episode")
                 break
 
             time.sleep(args.post_settle_pause)
@@ -805,12 +802,11 @@ def main() -> None:
     except KeyboardInterrupt:
         log_state(State.IDLE, f"stopped by user — {cycles} cycle(s) completed")
         if home_pos is not None:
-            log_state(State.SETTLING, "Ctrl+C received — returning arm to home before exit...")
             _cam_log.setLevel(logging.ERROR)
             try:
                 smooth_home(robot, home_pos)
             except Exception as home_err:
-                log_state(State.ERROR, f"Ctrl+C homing failed: {home_err}")
+                log_state(State.ERROR, f"✗ home failed: {home_err}")
             finally:
                 _cam_log.setLevel(logging.WARNING)
     except Exception as e:
